@@ -11,8 +11,8 @@ cdbb.bridge — 守护进程核心
   Unix Socket  (/tmp/cdbb.sock)
       │
       ▼
-  Bridge（本模块）── BLE NUS ──► M5StickC Plus
-      │                              │
+  Bridge（本模块）── TCP ──► 客户端设备
+      │                      │
       │◄─────── 按键决策（once/deny）──┘
       │
       ▼
@@ -29,11 +29,10 @@ cdbb.bridge — 守护进程核心
 
 额外改进
 --------
-- 自动 BLE 扫描发现（无需手动填写 ADDR）
-- 中文字符全部 sanitize（避免固件 5x7 点阵字体索引越界导致蓝牙栈重置）
-- entries 顺序修正（固件期望最旧在前，hook 上报最新在前，此处 reversed）
-- 支持 Linux（需 sudo setcap cap_net_raw+eip $(which python3)）
-- 通过环境变量 CDBB_ADDR 固定地址（跳过扫描，加速启动）
+- 支持 TCP 通信替代 BLE，更通用
+- 中文字符全部 sanitize（保护设备显示）
+- entries 顺序修正（设备期望最旧在前，hook 上报最新在前，此处 reversed）
+- 通过环境变量 CDBB_TCP_HOST / CDBB_TCP_PORT 配置 TCP 连接
 """
 
 from __future__ import annotations
@@ -48,31 +47,26 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from bleak import BleakClient, BleakScanner
-
-# ── BLE 常量（Nordic UART Service）────────────────────────────────────────────
-NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # 主机 → 设备（Write）
-NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # 设备 → 主机（Notify）
-
-DEVICE_NAME_PREFIX   = "Claude"       # 官方固件广播名前缀
-SOCKET_PATH          = "/tmp/cdbb.sock"
-HEARTBEAT_INTERVAL   = 3.0            # 秒，与官方桌面端保持一致
-HEARTBEAT_FAIL_LIMIT = 5              # 连续失败次数超限后自退出
-PERMISSION_TIMEOUT   = 110.0          # 秒，必须小于 CC hook 超时（120s）
-ENTRIES_MAX          = 5              # 设备显示的历史条目上限
+# ── TCP 常量 ───────────────────────────────────────────────────────────────────
+TCP_HOST_DEFAULT = "127.0.0.1"
+TCP_PORT_DEFAULT = 9876
+SOCKET_PATH      = "/tmp/cdbb.sock"
+HEARTBEAT_INTERVAL = 3.0            # 秒，与官方桌面端保持一致
+HEARTBEAT_FAIL_LIMIT = 5            # 连续失败次数超限后自退出
+PERMISSION_TIMEOUT   = 110.0        # 秒，必须小于 CC hook 超时（120s）
+ENTRIES_MAX          = 5            # 设备显示的历史条目上限
 
 logger = logging.getLogger("cdbb.bridge")
 
-# ── 中文 sanitize（固件 5×7 点阵字体只支持 ASCII）──────────────────────────────
+# ── 中文 sanitize（保护设备显示）───────────────────────────────────────────────
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
 
 def sanitize(text: str, max_len: int = 60) -> str:
-    """将非 ASCII 字符替换为 '?' 并截断，保护固件不崩溃。"""
+    """将非 ASCII 字符替换为 '?' 并截断，保护设备显示。"""
     return _NON_ASCII.sub("?", text)[:max_len]
 
 
-# ── 时区偏移（供设备时钟同步）────────────────────────────────────────────────
+# ── 时区偏移（供设备时钟同步）──────────────────────────────────────────────────
 def _tz_offset_seconds() -> int:
     return -time.altzone if time.daylight and time.localtime().tm_isdst else -time.timezone
 
@@ -88,7 +82,7 @@ class PendingRequest:
 
 @dataclass
 class BridgeState:
-    """所有可观测状态集中在一处，方便序列化为 BLE 快照。"""
+    """所有可观测状态集中在一处，方便序列化为 TCP 快照。"""
     pending: Optional[PendingRequest] = None
     entries: list[str] = field(default_factory=list)
 
@@ -100,7 +94,7 @@ class BridgeState:
                 "running": 0,
                 "waiting": 1,
                 "msg": sanitize(f"approve: {self.pending.tool}"),
-                # 固件期望最旧在前 → reversed
+                # 设备期望最旧在前 → reversed
                 "entries": list(reversed(self.entries[:ENTRIES_MAX])),
                 "tokens": 0,
                 "tokens_today": 0,
@@ -128,40 +122,61 @@ class BridgeState:
 
 # ── Bridge 主类 ───────────────────────────────────────────────────────────────
 class Bridge:
-    def __init__(self, client: BleakClient) -> None:
-        self.client = client
+    def __init__(self) -> None:
         self.state = BridgeState()
         self._rx_buf = bytearray()
         self._tx_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._write_lock = asyncio.Lock()
         self._permission_lock = asyncio.Lock()
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
 
-    # ── BLE 收发 ───────────────────────────────────────────────────────────────
+    # ── TCP 收发 ────────────────────────────────────────────────────────────────
 
-    def on_notify(self, _sender: int, data: bytearray) -> None:
-        """设备 → 主机：累积分包，按行解析。"""
-        self._rx_buf.extend(data)
-        while True:
-            nl = self._rx_buf.find(b"\n")
-            if nl < 0:
-                return
-            line = bytes(self._rx_buf[:nl])
-            del self._rx_buf[: nl + 1]
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line.decode("utf-8"))
-            except Exception as e:
-                logger.warning("设备消息解析失败: %r — %s", line, e)
-                continue
-            logger.debug("设备 → 主机: %s", json.dumps(obj, ensure_ascii=False))
-            self._tx_queue.put_nowait(obj)
+    def set_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """设置 TCP 连接。"""
+        self._reader = reader
+        self._writer = writer
+
+    async def receive_loop(self) -> None:
+        """设备 → 主机：接收并解析 TCP 数据。"""
+        if not self._reader:
+            return
+
+        try:
+            while True:
+                data = await self._reader.read(4096)
+                if not data:
+                    logger.warning("TCP 连接已断开")
+                    break
+                self._rx_buf.extend(data)
+                while True:
+                    nl = self._rx_buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    line = bytes(self._rx_buf[:nl])
+                    del self._rx_buf[: nl + 1]
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line.decode("utf-8"))
+                    except Exception as e:
+                        logger.warning("设备消息解析失败: %r — %s", line, e)
+                        continue
+                    logger.debug("设备 → 主机: %s", json.dumps(obj, ensure_ascii=False))
+                    self._tx_queue.put_nowait(obj)
+        except Exception as e:
+            logger.error("接收循环异常: %s", e)
 
     async def send(self, obj: dict) -> None:
-        """主机 → 设备：序列化为 JSON 行，Write With Response 发出。"""
+        """主机 → 设备：序列化为 JSON 行，通过 TCP 发出。"""
+        if not self._writer:
+            raise RuntimeError("TCP 连接未建立")
+        
         payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
         async with self._write_lock:
-            await self.client.write_gatt_char(NUS_RX, payload, response=True)
+            self._writer.write(payload)
+            await self._writer.drain()
 
     async def push_snapshot(self) -> None:
         await self.send(self.state.snapshot())
@@ -182,8 +197,7 @@ class Bridge:
                     consecutive_failures, HEARTBEAT_FAIL_LIMIT, e,
                 )
                 if consecutive_failures >= HEARTBEAT_FAIL_LIMIT:
-                    logger.error("BLE 链路已死，退出等待重启…")
-                    # os._exit 绕过 asyncio 清理，避免 wedged BleakClient 死锁
+                    logger.error("TCP 链路已死，退出等待重启…")
                     os._exit(1)
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
@@ -315,34 +329,21 @@ class Bridge:
             pass
 
 
-# ── BLE 扫描与连接 ────────────────────────────────────────────────────────────
+# ── TCP 连接 ───────────────────────────────────────────────────────────────────
 
-async def find_device() -> str:
-    """扫描并返回第一个以 'Claude' 开头的设备地址。"""
-    env_addr = os.environ.get("CDBB_ADDR", "").strip()
-    if env_addr:
-        logger.info("使用环境变量 CDBB_ADDR=%s（跳过扫描）", env_addr)
-        return env_addr
-
-    logger.info("正在扫描 BLE 设备（广播名前缀：%s）…", DEVICE_NAME_PREFIX)
-    device = await BleakScanner.find_device_by_filter(
-        lambda d, _ad: bool(d.name and d.name.startswith(DEVICE_NAME_PREFIX)),
-        timeout=15.0,
-    )
-    if device is None:
-        raise RuntimeError(
-            f"未找到名称以 '{DEVICE_NAME_PREFIX}' 开头的 BLE 设备。\n"
-            "  • 确认设备已开机且蓝牙已启用\n"
-            "  • 或通过 CDBB_ADDR=<地址> 环境变量手动指定"
-        )
-    logger.info("发现设备: %s  地址: %s", device.name, device.address)
-    return device.address
+async def connect_to_tcp_server(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """连接到 TCP 服务器（设备端）。"""
+    logger.info("正在连接 TCP 服务器 %s:%d …", host, port)
+    reader, writer = await asyncio.open_connection(host, port)
+    logger.info("已连接 TCP 服务器")
+    return reader, writer
 
 
 # ── 主入口 ─────────────────────────────────────────────────────────────────────
 
 async def run() -> None:
-    addr = await find_device()
+    host = os.environ.get("CDBB_TCP_HOST", TCP_HOST_DEFAULT)
+    port = int(os.environ.get("CDBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
@@ -360,54 +361,52 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
-    logger.info("正在连接 %s …", addr)
-    async with BleakClient(addr, timeout=15.0) as client:
-        logger.info("已连接，MTU=%d", client.mtu_size)
-        bridge = Bridge(client)
+    reader, writer = await connect_to_tcp_server(host, port)
+    bridge = Bridge()
+    bridge.set_connection(reader, writer)
 
-        await client.start_notify(NUS_TX, bridge.on_notify)
-        logger.info("已订阅设备通知")
+    # 同步设备时钟
+    await bridge.send({"time": [int(time.time()), _tz_offset_seconds()]})
 
-        # 同步设备时钟
-        await bridge.send({"time": [int(time.time()), _tz_offset_seconds()]})
+    server = await asyncio.start_unix_server(
+        bridge.handle_hook_client, path=SOCKET_PATH
+    )
+    os.chmod(SOCKET_PATH, 0o600)
+    logger.info("Unix Socket 监听中: %s", SOCKET_PATH)
 
-        server = await asyncio.start_unix_server(
-            bridge.handle_hook_client, path=SOCKET_PATH
-        )
-        os.chmod(SOCKET_PATH, 0o600)
-        logger.info("Unix Socket 监听中: %s", SOCKET_PATH)
+    hb_task   = asyncio.create_task(bridge.heartbeat_loop(),  name="heartbeat")
+    tx_task   = asyncio.create_task(bridge.tx_dispatcher(),   name="tx_dispatcher")
+    rx_task   = asyncio.create_task(bridge.receive_loop(),    name="receive_loop")
+    srv_task  = asyncio.create_task(server.serve_forever(),   name="unix_server")
+    stop_task = asyncio.create_task(stop_event.wait(),        name="stop_wait")
 
-        hb_task   = asyncio.create_task(bridge.heartbeat_loop(),  name="heartbeat")
-        tx_task   = asyncio.create_task(bridge.tx_dispatcher(),   name="tx_dispatcher")
-        srv_task  = asyncio.create_task(server.serve_forever(),   name="unix_server")
-        stop_task = asyncio.create_task(stop_event.wait(),        name="stop_wait")
+    logger.info("claude-desktop-buddy-bridge 守护进程已就绪 ✓")
 
-        logger.info("claude-desktop-buddy-bridge 守护进程已就绪 ✓")
+    done, pending = await asyncio.wait(
+        {hb_task, tx_task, rx_task, srv_task, stop_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
 
-        done, pending = await asyncio.wait(
-            {hb_task, tx_task, srv_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+    for t in pending:
+        t.cancel()
 
-        for t in pending:
-            t.cancel()
+    for t in done:
+        if t is not stop_task and not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.error("任务 %s 异常退出: %r", t.get_name(), exc)
 
-        for t in done:
-            if t is not stop_task and not t.cancelled():
-                exc = t.exception()
-                if exc:
-                    logger.error("任务 %s 异常退出: %r", t.get_name(), exc)
+    server.close()
+    try:
+        await server.wait_closed()
+    except Exception:
+        pass
 
-        server.close()
-        try:
-            await server.wait_closed()
-        except Exception:
-            pass
-
-        try:
-            await client.stop_notify(NUS_TX)
-        except Exception:
-            pass
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)

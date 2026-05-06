@@ -2,11 +2,10 @@
 cdbb.cli — 命令行入口
 
 用法:
-  cdbb daemon          启动守护进程（连接 BLE 设备，监听 Unix Socket）
-  cdbb scan            扫描附近的 Claude BLE 设备并打印地址
-  cdbb install         自动注入 Claude Code hook 配置
-  cdbb uninstall       移除 Claude Code hook 配置
-  cdbb status          检查守护进程是否在线
+  cdbb daemon                  启动守护进程（连接 TCP 设备，监听 Unix Socket）
+  cdbb install                 自动注入 Claude Code hook 配置
+  cdbb uninstall               移除 Claude Code hook 配置
+  cdbb status                  检查守护进程是否在线
 """
 
 from __future__ import annotations
@@ -43,29 +42,6 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         asyncio.run(run())
     except KeyboardInterrupt:
         pass
-
-
-# ── 子命令：scan ──────────────────────────────────────────────────────────────
-
-def cmd_scan(_args: argparse.Namespace) -> None:
-    _setup_logging()
-
-    async def _scan() -> None:
-        from bleak import BleakScanner
-        print("正在扫描 BLE 设备（10 秒）…\n")
-        devices = await BleakScanner.discover(timeout=10.0)
-        found = False
-        for d in sorted(devices, key=lambda x: x.name or ""):
-            marker = " ◀ cdbb 兼容" if (d.name or "").startswith("Claude") else ""
-            print(f"  {d.address}  {d.name or '(无名称)'}{marker}")
-            if marker:
-                found = True
-        if not found:
-            print("\n未发现 Claude 兼容设备。请确认设备已开机且在蓝牙范围内。")
-        else:
-            print(f"\n提示: 用 CDBB_ADDR=<地址> cdbb daemon 跳过扫描直接连接")
-
-    asyncio.run(_scan())
 
 
 # ── 子命令：status ─────────────────────────────────────────────────────────────
@@ -200,18 +176,17 @@ def cmd_uninstall(_args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="claude-desktop-buddy-bridge",
-        description="claude-desktop-buddy-bridge — Claude Code CLI ↔ BLE 物理审批按钮",
+        description="claude-desktop-buddy-bridge — Claude Code CLI ↔ TCP 物理审批按钮",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  cdbb scan                    # 扫描附近 BLE 设备
   cdbb install                 # 注入 hook（覆盖所有工具）
   cdbb install --tools Bash    # 只拦截 Bash 工具
-  cdbb daemon                  # 启动守护进程
+  cdbb daemon                  # 启动守护进程（连接默认 127.0.0.1:9876）
   cdbb daemon -v               # 调试模式（显示详细日志）
   cdbb status                  # 检查守护进程是否在线
   cdbb uninstall               # 移除 hook
-  CDBB_ADDR=XX:XX:XX:XX cdbb daemon   # 跳过扫描
+  CDBB_TCP_HOST=192.168.1.100 CDBB_TCP_PORT=8888 cdbb daemon  # 自定义 TCP 地址
 """,
     )
     parser.add_argument("-V", "--version", action="version", version=f"claude-desktop-buddy-bridge {__version__}")
@@ -219,13 +194,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # daemon
-    p_daemon = sub.add_parser("daemon", help="启动 BLE 守护进程")
+    p_daemon = sub.add_parser("daemon", help="启动 TCP 守护进程")
     p_daemon.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
     p_daemon.set_defaults(func=cmd_daemon)
-
-    # scan
-    p_scan = sub.add_parser("scan", help="扫描附近 Claude BLE 设备")
-    p_scan.set_defaults(func=cmd_scan)
 
     # status
     p_status = sub.add_parser("status", help="检查守护进程是否在线")

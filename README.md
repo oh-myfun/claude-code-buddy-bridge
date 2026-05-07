@@ -1,20 +1,20 @@
-# claude-code-buddy
+# claude-code-buddy-bridge
 
 > 用一个设备作为 Claude Code CLI 的物理审批按钮 — 电脑作为 TCP 服务端，设备作为客户端连接
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-orange.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)]
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
 
 Anthropic 的官方 claude-desktop-buddy 固件让设备变成 Claude 的物理审批按钮——但它只与桌面应用通信，CLI 用户无缘使用。
 
-**claude-code-buddy** 填补这个空缺：一个轻量 Python 守护进程，通过 Claude Code 原生 Hook 系统拦截工具调用。电脑作为 TCP 服务端监听，设备作为 TCP 客户端连接，让你用手边的设备来 approve / deny，而不是盯着终端敲 y。
+**claude-code-buddy-bridge** 填补这个空缺：一个轻量 Python 守护进程，通过 Claude Code 原生 Hook 系统拦截工具调用。电脑作为 TCP 服务端监听，设备作为 TCP 客户端连接，让你用手边的设备来 approve / deny，而不是盯着终端敲 y。
 
 ```mermaid
 flowchart TD
     A["Claude Code CLI\nPermissionRequest 钩子"]
-    B["ccb 守护进程\n（TCP 服务端）"]
+    B["ccbb 守护进程\n（TCP 服务端）"]
     C["设备\n（TCP 客户端）"]
     D["按键决策\n批准或中止"]
     E["继续执行"]
@@ -46,17 +46,17 @@ flowchart TD
 
 ### 1. 启动守护进程（电脑作为服务端）
 
-首先在电脑上运行 ccb daemon：
+首先在电脑上运行 ccbb daemon：
 
 ```bash
 cd /workspace
 uv sync
-uv run ccb daemon
+uv run ccbb daemon
 ```
 
 默认监听 `0.0.0.0:9876`，可以通过环境变量自定义：
 ```bash
-CCB_TCP_HOST=192.168.1.100 CCB_TCP_PORT=8888 uv run ccb daemon
+CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 uv run ccbb daemon
 ```
 
 ### 2. 启动示例设备客户端
@@ -69,15 +69,15 @@ python3 examples/tcp_device_client.py
 
 如果设备在另一台机器上：
 ```bash
-CCB_TCP_HOST=192.168.1.100 CCB_TCP_PORT=8888 python3 examples/tcp_device_client.py
+CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 python3 examples/tcp_device_client.py
 ```
 
 ### 3. 注入 Claude Code Hook
 
 ```bash
-uv run ccb install
+uv run ccbb install
 # 只拦截 Bash 工具（更精准）：
-# uv run ccb install --tools Bash
+# uv run ccbb install --tools Bash
 ```
 
 这条命令会自动在 `~/.claude/settings.json` 中写入配置。
@@ -89,7 +89,7 @@ uv run ccb install
 - **在示例设备中输入 `A`** → 批准（`allow`）
 - **在示例设备中输入 `D`** → 拒绝（`deny`）
 
-设备不在线？ccb 超时后自动 fail-open，CC 弹出自己的对话框。
+设备不在线？ccbb 超时后自动 fail-open，CC 弹出自己的对话框。
 
 ---
 
@@ -97,12 +97,12 @@ uv run ccb install
 
 | 命令 | 说明 |
 |------|------|
-| `ccb install` | 注入 hook 到 Claude Code 配置 |
-| `ccb install --tools Bash Write` | 只拦截指定工具 |
-| `ccb daemon` | 启动守护进程（TCP 服务端） |
-| `ccb daemon -v` | 调试模式（显示详细日志） |
-| `ccb status` | 检查守护进程是否在线 |
-| `ccb uninstall` | 移除 hook 配置 |
+| `ccbb install` | 注入 hook 到 Claude Code 配置 |
+| `ccbb install --tools Bash Write` | 只拦截指定工具 |
+| `ccbb daemon` | 启动守护进程（TCP 服务端） |
+| `ccbb daemon -v` | 调试模式（显示详细日志） |
+| `ccbb status` | 检查守护进程是否在线 |
+| `ccbb uninstall` | 移除 hook 配置 |
 
 ---
 
@@ -110,8 +110,8 @@ uv run ccb install
 
 | 变量 | 说明 |
 |------|------|
-| `CCB_TCP_HOST` | TCP 服务端监听地址（默认 0.0.0.0） |
-| `CCB_TCP_PORT` | TCP 服务端监听端口（默认 9876） |
+| `CCBB_TCP_HOST` | TCP 服务端监听地址（默认 0.0.0.0） |
+| `CCBB_TCP_PORT` | TCP 服务端监听端口（默认 9876） |
 
 ---
 
@@ -176,14 +176,14 @@ uv run ccb install
 
 ```bash
 git clone <repository-url>
-cd claude-code-buddy
+cd claude-code-buddy-bridge
 uv sync --extra dev
 
 # 运行测试
 uv run pytest
 
 # 直接运行
-uv run ccb daemon -v
+uv run ccbb daemon -v
 ```
 
 ---

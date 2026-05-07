@@ -1,5 +1,5 @@
 """
-ccb.bridge — 守护进程核心
+ccbb.bridge — 守护进程核心
 
 架构说明
 --------
@@ -8,10 +8,10 @@ ccb.bridge — 守护进程核心
   Claude Code CLI
       │ PreToolUse hook（每次工具调用触发）
       ▼
-  Unix Socket  (/tmp/ccb.sock
+  Unix Socket  (/tmp/ccbb.sock)
       │
       ▼
-  Bridge（本模块 - TCP 服务端）◄─── TCP ─── 设备（TCP 客户端
+  Bridge（本模块 - TCP 服务端）◄─── TCP ─── 设备（TCP 客户端）
       │
       ▼
   把 decision 写回 hook 进程 → hook 输出 CC 协议 JSON → Claude Code 继续
@@ -29,7 +29,7 @@ ccb.bridge — 守护进程核心
 - 电脑作为 TCP 服务端，设备主动连接
 - 支持多个设备可同时连接
 - 中文安全：所有发往设备的字符串自动 sanitize，避免特殊字符问题
-- 通过环境变量 CCB_TCP_HOST / CCB_TCP_PORT 配置 TCP 服务端监听地址
+- 通过环境变量 CCBB_TCP_HOST / CCBB_TCP_PORT 配置 TCP 服务端监听地址
 """
 
 from __future__ import annotations
@@ -47,12 +47,12 @@ from typing import Optional, Set
 # ── TCP 常量 ───────────────────────────────────────────────────────────────────
 TCP_HOST_DEFAULT = "0.0.0.0"  # 监听所有网络接口
 TCP_PORT_DEFAULT = 9876
-SOCKET_PATH = "/tmp/ccb.sock"
+SOCKET_PATH = "/tmp/ccbb.sock"
 HEARTBEAT_INTERVAL = 3.0  # 秒
 PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
 ENTRIES_MAX = 5  # 设备显示的历史记录上限
 
-logger = logging.getLogger("ccb.bridge")
+logger = logging.getLogger("ccbb.bridge")
 
 # ── 中文 sanitize（保护设备显示）───────────────────────────────────────────────
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
@@ -356,8 +356,8 @@ class Bridge:
 
 
 async def run() -> None:
-    host = os.environ.get("CCB_TCP_HOST", TCP_HOST_DEFAULT)
-    port = int(os.environ.get("CCB_TCP_PORT", str(TCP_PORT_DEFAULT)))
+    host = os.environ.get("CCBB_TCP_HOST", TCP_HOST_DEFAULT)
+    port = int(os.environ.get("CCBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
@@ -393,7 +393,7 @@ async def run() -> None:
     hb_task = asyncio.create_task(bridge.heartbeat_loop(), name="heartbeat")
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
 
-    logger.info("claude-code-buddy 守护进程已就绪 ✓")
+    logger.info("claude-code-buddy-bridge 守护进程已就绪 ✓")
 
     done, pending = await asyncio.wait(
         {hb_task, stop_task},
@@ -432,4 +432,4 @@ async def run() -> None:
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
-    logger.info("claude-code-buddy 已退出")
+    logger.info("claude-code-buddy-bridge 已退出")

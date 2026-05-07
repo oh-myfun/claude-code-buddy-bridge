@@ -1,5 +1,5 @@
 """
-ccb.hook — Claude Code PermissionRequest hook
+ccbb.hook — Claude Code PermissionRequest hook
 
 Claude Code 在每次需要用户授权工具调用时执行此脚本。
 脚本通过 Unix Socket 连接守护进程，把决策结果翻译为 CC hook 协议。
@@ -13,7 +13,7 @@ CC hook 协议（stdout JSON）
 
 Fail-open 设计
   守护进程未运行、连接超时、任何异常 → exit(0) 无输出 → CC 自己处理
-  这保证了 ccb 不在线时不会阻断任何操作。
+  这保证了 ccbb 不在线时不会阻断任何操作。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import json
 import socket
 import sys
 
-SOCKET_PATH = "/tmp/ccb.sock"
+SOCKET_PATH = "/tmp/ccbb.sock"
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
 READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）
 HINT_MAX = 200
@@ -147,7 +147,7 @@ def main() -> None:
     if decision == "once":
         _emit_allow()
     elif decision == "deny":
-        _emit_deny("已通过 ccb 拒绝此操作")
+        _emit_deny("已通过 ccbb 拒绝此操作")
     else:
         # "timeout" / "abandoned" / None / 其他未知值 → fail-open
         _fail_open()

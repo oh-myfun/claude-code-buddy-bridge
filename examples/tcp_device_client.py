@@ -68,8 +68,8 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
 
 async def main():
     """主函数 - 作为 TCP 客户端连接到服务端"""
-    host = os.environ.get("CCB_TCP_HOST", "127.0.0.1")
-    port = int(os.environ.get("CCB_TCP_PORT", "9876"))
+    host = os.environ.get("CCBB_TCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("CCBB_TCP_PORT", "9876"))
 
     print(f"[设备] 正在连接到 TCP 服务端 {host}:{port}…")
 
@@ -77,7 +77,7 @@ async def main():
         reader, writer = await asyncio.open_connection(host, port)
     except Exception as e:
         print(f"[设备] 连接失败: {e}")
-        print("[设备] 请确保 ccb daemon 正在运行")
+        print("[设备] 请确保 ccbb daemon 正在运行")
         return
 
     print(f"[设备] 已连接到服务端")

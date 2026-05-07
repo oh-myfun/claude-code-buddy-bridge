@@ -4,10 +4,11 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-orange.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![uv](https://img.shields.io/badge/package_manager-uv-purple.svg)](https://github.com/astral-sh/uv)
 
 ---
 
-Anthropic 的官方 claude-desktop-buddy 固件让设备变成 Claude 的物理审批按钮——但它只支持特定硬件和蓝牙通信。
+Anthropic 的官方 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) 固件让设备变成 Claude 的物理审批按钮——但它只支持特定硬件和蓝牙通信。
 
 **claude-code-buddy-bridge** 提供了一个更通用的解决方案：通过标准 TCP 网络协议通信，让任何支持网络的设备（手机、嵌入式设备、单片机等）都可以作为 Claude Code 的物理审批按钮。
 
@@ -261,7 +262,23 @@ s.close()
 
 ## macOS 开机自启（launchd）
 
-参考 `extras/` 目录下的示例 plist 文件，修改后放到 `~/Library/LaunchAgents/` 目录。
+```bash
+# 先确认 ccbb 安装路径
+which ccbb
+
+# 编辑 plist，将路径替换为上一步的输出
+cp extras/dev.ccbb.daemon.plist ~/Library/LaunchAgents/
+# 编辑文件，修改 ProgramArguments 中的路径
+
+launchctl load ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+```
+
+卸载：
+
+```bash
+launchctl unload ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+rm ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+```
 
 ---
 
@@ -279,11 +296,30 @@ uv run pytest
 uv run ccbb daemon -v
 ```
 
+### 项目结构
+
+```
+ccbb/
+├── src/ccbb/
+│   ├── __init__.py     版本号
+│   ├── bridge.py       守护进程核心（TCP 服务端 + Unix Socket 服务器）
+│   ├── hook.py         被 Claude Code 调用的 hook 脚本
+│   └── cli.py          命令行入口（daemon / install / status）
+├── examples/
+│   └── tcp_device_client.py   TCP 设备客户端示例
+├── extras/
+│   └── dev.ccbb.daemon.plist   macOS launchd 配置模板
+├── pyproject.toml
+└── README.md
+```
+
 ---
 
 ## 致谢
 
-项目架构设计参考了 CharmYue/cc-buddy-bridge 和 cuiqingwei/claude-desktop-buddy-bridge。
+协议格式参考了 Anthropic 的 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)。
+
+核心架构设计参考了 [CharmYue/cc-buddy-bridge](https://github.com/CharmYue/cc-buddy-bridge) 和 [cuiqingwei/claude-desktop-buddy-bridge](https://github.com/cuiqingwei/claude-desktop-buddy-bridge)——尤其是 EOF 竞争检测、permission_lock 串行化和 fail-open 设计。
 
 ---
 

@@ -1,6 +1,6 @@
-# claude-desktop-buddy-bridge
+# claude-code-buddy-bridge
 
-> 用一块实体小屏幕，按键审批 Claude Code CLI 的每一次敏感操作。
+> 通过网络协议实现物理审批按钮 — 支持手机、嵌入式设备等任何支持 TCP 的设备
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-orange.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -8,31 +8,23 @@
 
 ---
 
-<p align="center">
-  <img src="docs/images/img1.jpeg" width="230" alt="ai">
-  &nbsp;&nbsp;
-  <img src="docs/images/img2.jpeg" width="230" alt="photo">
-  &nbsp;&nbsp;
-  <img src="docs/images/img3.jpeg" width="230" alt="ai">
-</p>
+Anthropic 的官方 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) 固件让设备变成 Claude 的物理审批按钮——但它只支持特定硬件和蓝牙通信。
 
-Anthropic 的官方 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) 固件让 M5StickC Plus 变成 Claude 的物理审批按钮——但它只与**桌面应用**通信，CLI 用户无缘使用。
-
-**claude-desktop-buddy-bridge** 填补这个空缺：一个轻量 Python 守护进程，通过 Claude Code 原生 Hook 系统拦截工具调用，经由 BLE NUS 协议与设备通信，让你用手边的硬件按键来 approve / deny，而不是盯着终端敲 y。
+**claude-code-buddy-bridge** 提供了一个更通用的解决方案：通过标准 TCP 网络协议通信，让任何支持网络的设备（手机、嵌入式设备、单片机等）都可以作为 Claude Code 的物理审批按钮。
 
 ```mermaid
 flowchart TD
-    A["**Claude Code CLI**\nPermissionRequest 钩子"]
-    B["**cdbb 守护进程**"]
-    C["**M5StickC Plus**"]
-    D["**按键决策**\n批准或中止"]
-    E["**继续执行**"]
-    F["**中止任务**"]
+    A["Claude Code CLI\nPermissionRequest 钩子"]
+    B["ccbb 守护进程\n（TCP 服务端）"]
+    C["设备\n（TCP 客户端）"]
+    D["按键决策\n批准或中止"]
+    E["继续执行"]
+    F["中止任务"]
 
     A --> B
-    B -->|"BLE（NUS）"| C
+    B --"TCP/IP 网络"--> C
     C --> D
-    D -->|"决策结果"| B
+    D --"决策结果"--> B
     B --> E
     B --> F
 ```
@@ -43,114 +35,105 @@ flowchart TD
 
 - **零侵入**：通过 Claude Code 原生 Hook 接入，不需要修改任何项目文件
 - **Fail-open**：守护进程未运行时，CC 自动回退到自己的权限对话框
-- **自动扫描**：无需手动查找设备地址，自动发现广播名以 `Claude` 开头的设备
-- **中文安全**：所有发往设备的字符串自动 sanitize，避免固件点阵字体索引越界崩溃
+- **TCP 网络通信**：使用标准 TCP/IP 协议，跨平台、跨设备兼容
+- **多设备支持**：手机、嵌入式设备、单片机等任何支持 TCP 的设备均可连接
+- **支持多设备同时连接**：多个设备可以同时连接并接收审批请求
+- **完整上下文传递**：所有 Claude Code Hook 的原始信息都会传递给设备
+- **支持多语言**：不再有中文等非 ASCII 字符的限制
 - **并发串行**：多个并发 hook 请求排队，不会同时争抢设备
 - **EOF 竞争检测**：若 CC 提前终止 hook 进程，立即清空设备显示，不会傻等超时
-- **心跳自愈**：BLE 链路断开后连续失败退出，由 launchd/systemd 自动重启
 
 ---
 
-## 硬件要求
+## 支持的设备
 
-- **M5StickC Plus**，烧录 Anthropic 官方 `claude-desktop-buddy` 固件
-- macOS（已测试）或 Linux（需额外蓝牙权限配置，见下文）
+任何支持 TCP 客户端的设备都可以使用：
+
+- 📱 **智能手机**：通过 App 或脚本连接
+- 🔧 **嵌入式设备**：ESP32、Arduino、Raspberry Pi 等
+- 💻 **电脑/服务器**：通过脚本或程序连接
+- 🕹️ **单片机**：任何支持网络功能的 MCU
 
 ---
 
 ## 快速开始
 
-### 1. 烧录固件
+### 1. 启动守护进程（电脑作为服务端）
+
+首先在电脑上运行 ccbb daemon：
 
 ```bash
-git clone https://github.com/anthropics/claude-desktop-buddy
-cd claude-desktop-buddy
-pio run -t erase && pio run -t upload
+cd /workspace
+uv sync
+uv run ccbb daemon
 ```
 
-### 2. 安装 claude-desktop-buddy-bridge
+默认监听 `0.0.0.0:9876`，可以通过环境变量自定义：
+```bash
+CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 uv run ccbb daemon
+```
+
+### 2. 连接设备（作为 TCP 客户端）
+
+任何支持 TCP 的设备都可以连接。以下是几种连接方式：
+
+#### 方式一：使用示例客户端（测试用）
 
 ```bash
-# 使用 uv（推荐）
-uv tool install claude-desktop-buddy-bridge
+python3 examples/tcp_device_client.py
+```
 
-# 或直接从源码
-git clone https://github.com/cuiqingwei/claude-desktop-buddy-bridge
-cd claude-desktop-buddy-bridge
-uv sync
+如果设备在另一台机器上：
+```bash
+CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 python3 examples/tcp_device_client.py
+```
+
+#### 方式二：使用手机 App
+
+编写一个简单的 TCP 客户端 App，连接到电脑的 IP 和端口。
+
+#### 方式三：使用嵌入式设备
+
+```cpp
+// ESP32 示例代码
+#include <WiFi.h>
+#include <WiFiClient.h>
+
+const char* ssid = "your_wifi_ssid";
+const char* password = "your_wifi_password";
+const char* host = "192.168.1.100";
+const int port = 9876;
+
+WiFiClient client;
+
+void setup() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
+  
+  if (client.connect(host, port)) {
+    client.println("{\"cmd\": \"permission\", \"id\": \"test\", \"decision\": \"once\"}");
+  }
+}
 ```
 
 ### 3. 注入 Claude Code Hook
 
 ```bash
-source .venv/bin/activate 
-cdbb install
+uv run ccbb install
 # 只拦截 Bash 工具（更精准）：
-# cdbb install --tools Bash
+# uv run ccbb install --tools Bash
 ```
 
-这条命令会自动在 `~/.claude/settings.json` 中写入：
+这条命令会自动在 `~/.claude/settings.json` 中写入配置。
 
-```json
-{
-  "hooks": {
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/cdbb-hook",
-            "timeout": 120
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-在 command 前面插入一行 
-
-```json
- "matcher": "Bash",
-```
-
-### 4. 启动守护进程
-
-```bash
-cdbb daemon
-```
-
-手动扫描并连接附近的 M5StickC Plus 设备(已经配对过的需要提前先忽略忘记设备)。
-
-```bash
-cdbb scan  
-```
-正常会得到如下结果：
-
-```bash
-cdbb scan    
-
-正在扫描 BLE 设备（10 秒）…
-
-F6DBFCE4-2CCB-AD5F-F6DD-3FFED230D9D0  Claude Buddy  ◀ cdbb 兼容
-```
-
-
-如果有多台设备或想跳过扫描：
-
-```bash
-CDBB_ADDR=F6DBFCE4-2CCB-AD5F-F6DD-3FFED230D9D0 cdbb daemon
-```
-
-### 5. 使用
+### 4. 使用
 
 打开 Claude Code，触发一个需要审批的操作（如执行 Bash 命令）：
 
-- **M5 正面按钮** → 批准（`allow`）
-- **M5 侧面按钮** → 拒绝（`deny`）
+- **在设备上发送批准指令** → 批准（`allow`）
+- **在设备上发送拒绝指令** → 拒绝（`deny`）
 
-设备不在手边？cdbb 超时后自动 fail-open，CC 弹出自己的对话框。
+设备不在线？ccbb 超时后自动 fail-open，CC 弹出自己的对话框。
 
 ---
 
@@ -158,47 +141,12 @@ CDBB_ADDR=F6DBFCE4-2CCB-AD5F-F6DD-3FFED230D9D0 cdbb daemon
 
 | 命令 | 说明 |
 |------|------|
-| `cdbb scan` | 扫描附近的 Claude BLE 设备 |
-| `cdbb install` | 注入 hook 到 Claude Code 配置 |
-| `cdbb install --tools Bash Write` | 只拦截指定工具 |
-| `cdbb daemon` | 启动守护进程 |
-| `cdbb daemon -v` | 调试模式（显示详细日志） |
-| `cdbb status` | 检查守护进程是否在线 |
-| `cdbb uninstall` | 移除 hook 配置 |
-
----
-
-## macOS 开机自启（launchd）
-
-```bash
-# 先确认 cdbb 安装路径
-which cdbb
-
-# 编辑 plist，将路径替换为上一步的输出
-cp extras/dev.cdbb.daemon.plist ~/Library/LaunchAgents/
-# 编辑文件，修改 ProgramArguments 中的路径
-
-launchctl load ~/Library/LaunchAgents/dev.cdbb.daemon.plist
-```
-
-卸载：
-
-```bash
-launchctl unload ~/Library/LaunchAgents/dev.cdbb.daemon.plist
-rm ~/Library/LaunchAgents/dev.cdbb.daemon.plist
-```
-
----
-
-## Linux 蓝牙权限
-
-Linux 上默认需要 root 才能访问 BLE。推荐方式：
-
-```bash
-sudo setcap cap_net_raw+eip $(which python3)
-# 或者指定 venv 里的 python
-sudo setcap cap_net_raw+eip $(uv run which python)
-```
+| `ccbb install` | 注入 hook 到 Claude Code 配置 |
+| `ccbb install --tools Bash Write` | 只拦截指定工具 |
+| `ccbb daemon` | 启动守护进程（TCP 服务端） |
+| `ccbb daemon -v` | 调试模式（显示详细日志） |
+| `ccbb status` | 检查守护进程是否在线 |
+| `ccbb uninstall` | 移除 hook 配置 |
 
 ---
 
@@ -206,49 +154,171 @@ sudo setcap cap_net_raw+eip $(uv run which python)
 
 | 变量 | 说明 |
 |------|------|
-| `CDBB_ADDR` | 直接指定 BLE 设备地址，跳过扫描（如 `00:4B:12:A2:4A:8A`） |
+| `CCBB_TCP_HOST` | TCP 服务端监听地址（默认 0.0.0.0） |
+| `CCBB_TCP_PORT` | TCP 服务端监听端口（默认 9876） |
 
 ---
 
-## 已知固件问题（claude-desktop-buddy）
+## TCP 协议说明
 
-以下是官方固件的已知 bug，claude-desktop-buddy-bridge 在代码层面已全部处理：
+守护进程作为 TCP 服务端，设备作为客户端连接。双方通过 JSON 行协议通信。
 
-| 问题 | cdbb 处理方式 |
-|------|-------------------|
-| 5×7 点阵字体不支持 UTF-8，非 ASCII 字节导致蓝牙栈约 1 秒内硬重置 | 所有字符串通过 `sanitize()` 替换为 `?` |
-| `entries` 字段固件期望最旧在前，而非最新在前 | `snapshot()` 中 `reversed()` 处理 |
+### 从服务端到设备
+
+**时间同步**：
+```json
+{"time": [1234567890, 28800]}
+```
+
+**快照（状态更新）**：
+```json
+{
+  "total": 1,
+  "running": 0,
+  "waiting": 1,
+  "msg": "approve: Bash",
+  "entries": ["10:30 Bash: ls -la"],
+  "tokens": 0,
+  "tokens_today": 0,
+  "prompt": {
+    "id": "req_12345",
+    "tool": "Bash",
+    "hint": "ls -la"
+  },
+  "context": {
+    "tool_use_id": "req_12345",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "ls -la"
+    }
+  }
+}
+```
+
+**context 字段**（可选）：包含 Claude Code Hook 的完整原始信息，设备可以根据需要展示或使用此信息。
+
+### 从设备到服务端
+
+**审批决策**：
+```json
+{
+  "cmd": "permission",
+  "id": "req_12345",
+  "decision": "once"
+}
+```
+
+决策值可以是：
+- `once`：批准
+- `deny`：拒绝
+
+**确认响应**（从服务端到设备）：
+```json
+{"ack": "permission", "ok": true, "n": 0}
+```
+
+---
+
+## 设备开发指南
+
+### 基本流程
+
+1. **连接到 TCP 服务端**：连接到电脑的 IP 和端口
+2. **接收快照消息**：解析 JSON 格式的状态更新
+3. **显示审批请求**：当 `waiting > 0` 时，显示 `prompt` 中的信息
+4. **发送决策**：用户操作后，发送包含 `cmd`、`id` 和 `decision` 的 JSON
+
+### 最小实现示例
+
+```python
+import socket
+import json
+
+# 连接到服务端
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(("192.168.1.100", 9876))
+
+# 接收消息
+while True:
+    data = s.recv(1024)
+    if not data:
+        break
+    msg = json.loads(data.decode())
+    
+    # 检查是否有待审批请求
+    if msg.get("waiting", 0) > 0:
+        prompt = msg["prompt"]
+        print(f"审批请求: {prompt['tool']} - {prompt['hint']}")
+        
+        # 模拟用户输入
+        decision = input("批准(a)或拒绝(d)? ").strip().lower()
+        if decision == "a":
+            s.sendall(json.dumps({
+                "cmd": "permission",
+                "id": prompt["id"],
+                "decision": "once"
+            }).encode() + b"\n")
+        elif decision == "d":
+            s.sendall(json.dumps({
+                "cmd": "permission",
+                "id": prompt["id"],
+                "decision": "deny"
+            }).encode() + b"\n")
+
+s.close()
+```
+
+---
+
+## macOS 开机自启（launchd）
+
+```bash
+# 先确认 ccbb 安装路径
+which ccbb
+
+# 编辑 plist，将路径替换为上一步的输出
+cp extras/dev.ccbb.daemon.plist ~/Library/LaunchAgents/
+# 编辑文件，修改 ProgramArguments 中的路径
+
+launchctl load ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+```
+
+卸载：
+
+```bash
+launchctl unload ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+rm ~/Library/LaunchAgents/dev.ccbb.daemon.plist
+```
 
 ---
 
 ## 开发
 
 ```bash
-git clone https://github.com/cuiqingwei/claude-desktop-buddy-bridge
-cd claude-desktop-buddy-bridge
+git clone https://github.com/oh-myfun/claude-code-buddy-bridge
+cd claude-code-buddy-bridge
 uv sync --extra dev
 
 # 运行测试
 uv run pytest
 
 # 直接运行
-uv run cdbb scan
-uv run cdbb daemon -v
+uv run ccbb daemon -v
 ```
 
 ### 项目结构
 
 ```
-cdbb/
-├── src/cdbb/
+ccbb/
+├── src/ccbb/
 │   ├── __init__.py     版本号
-│   ├── bridge.py       守护进程核心（BLE 通信 + Unix Socket 服务器）
+│   ├── bridge.py       守护进程核心（TCP 服务端 + Unix Socket 服务器）
 │   ├── hook.py         被 Claude Code 调用的 hook 脚本
-│   └── cli.py          命令行入口（daemon / scan / install / status）
-├── tests/
-│   └── test_bridge.py  单元测试
+│   └── cli.py          命令行入口（daemon / install / status）
+├── examples/
+│   └── tcp_device_client.py   TCP 设备客户端示例
 ├── extras/
-│   └── dev.cdbb.daemon.plist   macOS launchd 配置模板
+│   └── dev.ccbb.daemon.plist   macOS launchd 配置模板
 ├── pyproject.toml
 └── README.md
 ```
@@ -257,9 +327,9 @@ cdbb/
 
 ## 致谢
 
-BLE 线协议、固件及硬件设计均来自 Anthropic 的 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)。
+协议格式参考了 Anthropic 的 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)。
 
-核心架构设计参考了 [CharmYue/cc-buddy-bridge](https://github.com/CharmYue/cc-buddy-bridge)——尤其是 EOF 竞争检测、permission_lock 串行化和 fail-open 设计，是目前社区实现中工程质量最高的版本。
+核心架构设计参考了 [CharmYue/cc-buddy-bridge](https://github.com/CharmYue/cc-buddy-bridge) 和 [cuiqingwei/claude-desktop-buddy-bridge](https://github.com/cuiqingwei/claude-desktop-buddy-bridge)——尤其是 EOF 竞争检测、permission_lock 串行化和 fail-open 设计。
 
 ---
 

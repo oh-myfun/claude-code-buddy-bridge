@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-desktop-buddy-bridge"
+name = "claude-code-buddy-bridge"
 version = "0.1.0"
-description = "让 M5StickC Plus 成为 Claude Code CLI 的物理审批按钮 — 无需桌面应用"
+description = "让设备成为 Claude Code CLI 的物理审批按钮 — 电脑作为 TCP 服务端"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "claude-desktop-buddy-bridge contributors" }]
+authors = [{ name = "claude-code-buddy-bridge contributors" }]
 requires-python = ">=3.11"
-keywords = ["claude-code", "ble", "m5stick", "hardware", "permission", "hook"]
+keywords = ["claude-code", "tcp", "hardware", "permission", "hook"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
@@ -18,18 +18,16 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "bleak>=0.22",
-]
+dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.8"]
 
 [project.scripts]
-cdbb = "cdbb.cli:main"
+ccbb = "ccbb.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cdbb"]
+packages = ["src/ccbb"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

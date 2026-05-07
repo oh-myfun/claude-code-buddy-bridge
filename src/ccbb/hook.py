@@ -25,12 +25,9 @@ import sys
 
 IS_WINDOWS = platform.system() == "Windows"
 
-# Unix Socket 路径（Unix 系统使用）
-SOCKET_PATH = "/tmp/ccbb.sock"
-
-# TCP 连接配置（Windows 或可选配置使用）
+# TCP 连接配置
 HOOK_HOST = "127.0.0.1"
-HOOK_PORT = 9877  # hook 连接端口
+HOOK_PORT = 9877  # hook 连接端口（仅本地访问）
 
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
 READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）
@@ -87,50 +84,19 @@ def _emit_deny(message: str) -> None:
 
 # ── 与守护进程通信 ─────────────────────────────────────────────────────────────
 
-def _create_connection() -> socket.socket:
-    """
-    创建到守护进程的连接。
-
-    Unix 系统：优先尝试 Unix Socket，失败后尝试 TCP
-    Windows 系统：使用 TCP Socket
-    """
-    # 首先尝试 Unix Socket（Unix 系统）
-    if not IS_WINDOWS:
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(CONNECT_TIMEOUT)
-            s.connect(SOCKET_PATH)
-            return s
-        except (OSError, FileNotFoundError, ConnectionRefusedError):
-            pass
-        except Exception:
-            pass
-
-    # 回退到 TCP Socket（Windows 或 Unix 系统）
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(CONNECT_TIMEOUT)
-        s.connect((HOOK_HOST, HOOK_PORT))
-        return s
-    except (ConnectionRefusedError, socket.timeout, OSError):
-        return None
-    except Exception:
-        return None
-
-
 def _ask_bridge(payload: bytes) -> str | None:
     """
     向守护进程发送请求，等待决策字符串。
     任何异常（包括守护进程未运行）都返回 None → fail-open。
     """
     try:
-        s = _create_connection()
-        if s is None:
-            return None
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     except OSError:
         return None
 
     try:
+        s.settimeout(CONNECT_TIMEOUT)
+        s.connect((HOOK_HOST, HOOK_PORT))
         s.sendall(payload)
         s.settimeout(READ_TIMEOUT)
 
@@ -141,7 +107,7 @@ def _ask_bridge(payload: bytes) -> str | None:
                 break
             buf.extend(chunk)
 
-    except (socket.timeout, OSError):
+    except (socket.timeout, OSError, ConnectionRefusedError):
         return None
     finally:
         try:

@@ -48,12 +48,11 @@ from dataclasses import dataclass, field
 from typing import Optional, Set
 
 # ── 跨平台常量 ───────────────────────────────────────────────────────────────────
-IS_WINDOWS = platform.system() == "Windows"
+# 统一使用 TCP Socket，跨平台完全一致，性能足够（本地通信）
 
 TCP_HOST_DEFAULT = "0.0.0.0"  # 监听所有网络接口
 TCP_PORT_DEFAULT = 9876  # 设备连接端口
-HOOK_TCP_PORT_DEFAULT = 9877  # hook 连接端口（Windows 使用 TCP）
-SOCKET_PATH = "/tmp/ccbb.sock"  # Unix Socket 路径（Unix 系统使用）
+HOOK_PORT_DEFAULT = 9877  # hook 连接端口（仅本地访问）
 HEARTBEAT_INTERVAL = 3.0  # 秒
 PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
 ENTRIES_MAX = 5  # 设备显示的历史记录上限
@@ -369,11 +368,7 @@ class Bridge:
 async def run() -> None:
     host = os.environ.get("CCBB_TCP_HOST", TCP_HOST_DEFAULT)
     device_port = int(os.environ.get("CCBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
-    hook_port = int(os.environ.get("CCBB_HOOK_PORT", str(HOOK_TCP_PORT_DEFAULT)))
-
-    # 清理旧的 socket 文件（仅 Unix 系统）
-    if not IS_WINDOWS and os.path.exists(SOCKET_PATH):
-        os.unlink(SOCKET_PATH)
+    hook_port = int(os.environ.get("CCBB_HOOK_PORT", str(HOOK_PORT_DEFAULT)))
 
     stop_event = asyncio.Event()
 
@@ -383,19 +378,10 @@ async def run() -> None:
 
     loop = asyncio.get_running_loop()
 
-    # 信号处理（Unix 系统支持 SIGINT/SIGTERM，Windows 只支持 SIGINT）
-    if not IS_WINDOWS:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, _stop)
-            except NotImplementedError:
-                pass
-    else:
-        # Windows: 使用 asyncio 的事件循环停止机制
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(signal.SIGINT, _stop)
-        except (NotImplementedError, ValueError):
-            # Windows 可能不支持某些信号处理
+            loop.add_signal_handler(sig, _stop)
+        except NotImplementedError:
             pass
 
     bridge = Bridge()
@@ -406,24 +392,11 @@ async def run() -> None:
     )
     logger.info(f"TCP 服务端已启动，设备连接监听 {host}:{device_port}")
 
-    # 启动 hook 通信服务端
-    # Unix 系统：使用 Unix Socket（更安全、更高效）
-    # Windows 系统：使用 TCP Socket（Unix Socket 在 Windows 上不可用）
-    if IS_WINDOWS:
-        # Windows: 使用 TCP Socket
-        hook_server = await asyncio.start_server(
-            bridge.handle_hook_client, "127.0.0.1", hook_port
-        )
-        logger.info(f"TCP 服务端已启动，hook 通信监听 127.0.0.1:{hook_port}")
-        hook_server_sock_path = None
-    else:
-        # Unix: 使用 Unix Socket
-        hook_server = await asyncio.start_server(
-            bridge.handle_hook_client, path=SOCKET_PATH
-        )
-        os.chmod(SOCKET_PATH, 0o600)
-        logger.info(f"Unix Socket 监听中: {SOCKET_PATH}")
-        hook_server_sock_path = SOCKET_PATH
+    # 启动 TCP 服务端（监听 hook 连接）
+    hook_server = await asyncio.start_server(
+        bridge.handle_hook_client, "127.0.0.1", hook_port
+    )
+    logger.info(f"TCP 服务端已启动，hook 通信监听 127.0.0.1:{hook_port}")
 
     hb_task = asyncio.create_task(bridge.heartbeat_loop(), name="heartbeat")
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
@@ -463,9 +436,5 @@ async def run() -> None:
         await device_server.wait_closed()
     except Exception:
         pass
-
-    # 清理 socket 文件（仅 Unix 系统）
-    if not IS_WINDOWS and hook_server_sock_path and os.path.exists(hook_server_sock_path):
-        os.unlink(hook_server_sock_path)
 
     logger.info("claude-code-buddy-bridge 已退出")

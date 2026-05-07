@@ -25,9 +25,9 @@ import sys
 
 IS_WINDOWS = platform.system() == "Windows"
 
-# TCP 连接配置
+# TCP 连接配置（与 bridge 共用同一端口）
 HOOK_HOST = "127.0.0.1"
-HOOK_PORT = 9877  # hook 连接端口（仅本地访问）
+HOOK_PORT = 9876  # hook 连接端口（仅本地访问）
 
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
 READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）

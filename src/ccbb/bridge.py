@@ -299,7 +299,7 @@ class Bridge:
         else:
             logger.warning(f"收到孤立 permission id={mid!r}")
 
-    async def _handle_device(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _handle_device(self, first_msg: dict, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """处理设备连接"""
         addr = writer.get_extra_info("peername")
         logger.info(f"新设备连接: {addr}")
@@ -319,6 +319,26 @@ class Bridge:
 
         try:
             rx_buf = bytearray()
+            
+            async def process_msg(msg: dict):
+                cmd = msg.get("cmd")
+                if cmd == "pair":
+                    pairing_code = msg.get("pairing_code")
+                    if pairing_code:
+                        await self._handle_pairing_request(device, pairing_code)
+                elif cmd == "permission":
+                    if device.pairing_code:
+                        await self._handle_permission_decision(device, msg)
+                    else:
+                        await self._send_to_device(device, {
+                            "cmd": "error",
+                            "reason": "请先配对"
+                        })
+                else:
+                    logger.warning(f"未知设备命令: {cmd}")
+
+            await process_msg(first_msg)
+
             while True:
                 data = await reader.read(4096)
                 if not data:
@@ -339,22 +359,7 @@ class Bridge:
                         logger.warning(f"设备 {addr} 消息解析失败: {line!r} — {e}")
                         continue
                     logger.debug(f"设备 {addr} → 主机: {json.dumps(msg, ensure_ascii=False)}")
-
-                    cmd = msg.get("cmd")
-                    if cmd == "pair":
-                        pairing_code = msg.get("pairing_code")
-                        if pairing_code:
-                            await self._handle_pairing_request(device, pairing_code)
-                    elif cmd == "permission":
-                        if device.pairing_code:
-                            await self._handle_permission_decision(device, msg)
-                        else:
-                            await self._send_to_device(device, {
-                                "cmd": "error",
-                                "reason": "请先配对"
-                            })
-                    else:
-                        logger.warning(f"未知设备命令: {cmd}")
+                    await process_msg(msg)
 
         except Exception as e:
             logger.error(f"设备连接处理异常: {e}")
@@ -362,14 +367,9 @@ class Bridge:
             self._remove_device(device)
             logger.info(f"设备断开: {addr}")
 
-    async def _handle_hook(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _handle_hook(self, msg: dict, writer: asyncio.StreamWriter):
         """处理 Hook 连接（单次请求）"""
         try:
-            first_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            if not first_line:
-                return
-
-            msg = json.loads(first_line.decode("utf-8"))
             logger.debug(f"Hook 消息: {json.dumps(msg, ensure_ascii=False)[:200]}")
 
             action = msg.get("action", "")
@@ -381,8 +381,6 @@ class Bridge:
             else:
                 logger.warning(f"未知的 Hook 消息格式: {msg}")
 
-        except asyncio.TimeoutError:
-            logger.warning("Hook 连接超时")
         except Exception as e:
             logger.error(f"Hook 连接处理异常: {e}")
         finally:
@@ -425,10 +423,10 @@ class Bridge:
 
         if self._is_hook_request(msg):
             logger.info(f"[{addr}] 识别为 Hook 连接")
-            await self._handle_hook(reader, writer)
+            await self._handle_hook(msg, writer)
         elif self._is_device_message(msg):
             logger.info(f"[{addr}] 识别为设备连接")
-            await self._handle_device(reader, writer)
+            await self._handle_device(msg, reader, writer)
         else:
             logger.warning(f"[{addr}] 无法识别的消息格式: {msg}")
             writer.close()

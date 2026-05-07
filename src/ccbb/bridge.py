@@ -38,7 +38,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import signal
 import time
 from dataclasses import dataclass, field
@@ -170,7 +169,7 @@ class Bridge:
             self.state.devices.remove(device)
             try:
                 device.writer.close()
-            except:
+            except Exception:
                 pass
             logger.info(f"设备断开连接: {device.addr}")
 
@@ -418,7 +417,7 @@ async def run() -> None:
         try:
             device.writer.close()
             await device.writer.wait_closed()
-        except:
+        except Exception:
             pass
 
     hook_server.close()

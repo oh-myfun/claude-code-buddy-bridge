@@ -6,7 +6,7 @@
 
   安装方法：
     cp extras/dev.cdbb.daemon.plist ~/Library/LaunchAgents/
-    # 将下方 /usr/local/bin/cdbb 替换为实际路径（which cdbb）
+    # 将下方 /usr/local/bin/ccbb 替换为实际路径（which ccbb）
     launchctl load ~/Library/LaunchAgents/dev.cdbb.daemon.plist
 
   卸载方法：
@@ -14,18 +14,18 @@
     rm ~/Library/LaunchAgents/dev.cdbb.daemon.plist
 
   日志位置：
-    ~/Library/Logs/cdbb/daemon.log
-    ~/Library/Logs/cdbb/daemon-error.log
+    ~/Library/Logs/ccbb/daemon.log
+    ~/Library/Logs/ccbb/daemon-error.log
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>dev.cdbb.daemon</string>
+    <string>dev.ccbb.daemon</string>
 
     <key>ProgramArguments</key>
     <array>
-        <!-- 替换为 `which cdbb` 的输出 -->
-        <string>/usr/local/bin/cdbb</string>
+        <!-- 替换为 `which ccbb` 的输出 -->
+        <string>/usr/local/bin/ccbb</string>
         <string>daemon</string>
     </array>
 
@@ -38,17 +38,19 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/Shared/cdbb-daemon.log</string>
+    <string>/Users/Shared/ccbb-daemon.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/Shared/cdbb-daemon-error.log</string>
+    <string>/Users/Shared/ccbb-daemon-error.log</string>
 
-    <!-- 蓝牙权限：macOS 13+ 需要在系统设置中手动授权终端/Python -->
+    <!-- 环境变量配置 -->
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- 可选：跳过扫描，直接连接指定地址 -->
-        <!-- <key>CDBB_ADDR</key> -->
-        <!-- <string>XX:XX:XX:XX:XX:XX</string> -->
+        <!-- 可选：指定 TCP 监听地址和端口 -->
+        <!-- <key>CCBB_TCP_HOST</key> -->
+        <!-- <string>0.0.0.0</string> -->
+        <!-- <key>CCBB_TCP_PORT</key> -->
+        <!-- <string>9876</string> -->
     </dict>
 </dict>
 </plist>

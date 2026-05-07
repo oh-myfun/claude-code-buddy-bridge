@@ -1,15 +1,15 @@
 # claude-code-buddy-bridge
 
-> 用一个设备作为 Claude Code CLI 的物理审批按钮 — 电脑作为 TCP 服务端，设备作为客户端连接
+> 通过网络协议实现物理审批按钮 — 支持手机、嵌入式设备等任何支持 TCP 的设备
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-orange.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ---
 
-Anthropic 的官方 claude-desktop-buddy 固件让设备变成 Claude 的物理审批按钮——但它只与桌面应用通信，CLI 用户无缘使用。
+Anthropic 的官方 claude-desktop-buddy 固件让设备变成 Claude 的物理审批按钮——但它只支持特定硬件和蓝牙通信。
 
-**claude-code-buddy-bridge** 填补这个空缺：一个轻量 Python 守护进程，通过 Claude Code 原生 Hook 系统拦截工具调用。电脑作为 TCP 服务端监听，设备作为 TCP 客户端连接，让你用手边的设备来 approve / deny，而不是盯着终端敲 y。
+**claude-code-buddy-bridge** 提供了一个更通用的解决方案：通过标准 TCP 网络协议通信，让任何支持网络的设备（手机、嵌入式设备、单片机等）都可以作为 Claude Code 的物理审批按钮。
 
 ```mermaid
 flowchart TD
@@ -21,7 +21,7 @@ flowchart TD
     F["中止任务"]
 
     A --> B
-    B --"TCP (设备主动连接)"--> C
+    B --"TCP/IP 网络"--> C
     C --> D
     D --"决策结果"--> B
     B --> E
@@ -34,11 +34,23 @@ flowchart TD
 
 - **零侵入**：通过 Claude Code 原生 Hook 接入，不需要修改任何项目文件
 - **Fail-open**：守护进程未运行时，CC 自动回退到自己的权限对话框
-- **TCP 服务端模式**：电脑作为服务端监听，设备作为客户端连接，更灵活的网络拓扑
-- **支持多设备连接**：多个设备可以同时连接并接收审批请求
+- **TCP 网络通信**：使用标准 TCP/IP 协议，跨平台、跨设备兼容
+- **多设备支持**：手机、嵌入式设备、单片机等任何支持 TCP 的设备均可连接
+- **支持多设备同时连接**：多个设备可以同时连接并接收审批请求
 - **中文安全**：所有发往设备的字符串自动 sanitize，避免特殊字符问题
 - **并发串行**：多个并发 hook 请求排队，不会同时争抢设备
 - **EOF 竞争检测**：若 CC 提前终止 hook 进程，立即清空设备显示，不会傻等超时
+
+---
+
+## 支持的设备
+
+任何支持 TCP 客户端的设备都可以使用：
+
+- 📱 **智能手机**：通过 App 或脚本连接
+- 🔧 **嵌入式设备**：ESP32、Arduino、Raspberry Pi 等
+- 💻 **电脑/服务器**：通过脚本或程序连接
+- 🕹️ **单片机**：任何支持网络功能的 MCU
 
 ---
 
@@ -59,9 +71,11 @@ uv run ccbb daemon
 CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 uv run ccbb daemon
 ```
 
-### 2. 启动示例设备客户端
+### 2. 连接设备（作为 TCP 客户端）
 
-在另一个终端运行（可以在同一台机器或另一台设备上）：
+任何支持 TCP 的设备都可以连接。以下是几种连接方式：
+
+#### 方式一：使用示例客户端（测试用）
 
 ```bash
 python3 examples/tcp_device_client.py
@@ -70,6 +84,34 @@ python3 examples/tcp_device_client.py
 如果设备在另一台机器上：
 ```bash
 CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 python3 examples/tcp_device_client.py
+```
+
+#### 方式二：使用手机 App
+
+编写一个简单的 TCP 客户端 App，连接到电脑的 IP 和端口。
+
+#### 方式三：使用嵌入式设备
+
+```cpp
+// ESP32 示例代码
+#include <WiFi.h>
+#include <WiFiClient.h>
+
+const char* ssid = "your_wifi_ssid";
+const char* password = "your_wifi_password";
+const char* host = "192.168.1.100";
+const int port = 9876;
+
+WiFiClient client;
+
+void setup() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
+  
+  if (client.connect(host, port)) {
+    client.println("{\"cmd\": \"permission\", \"id\": \"test\", \"decision\": \"once\"}");
+  }
+}
 ```
 
 ### 3. 注入 Claude Code Hook
@@ -86,8 +128,8 @@ uv run ccbb install
 
 打开 Claude Code，触发一个需要审批的操作（如执行 Bash 命令）：
 
-- **在示例设备中输入 `A`** → 批准（`allow`）
-- **在示例设备中输入 `D`** → 拒绝（`deny`）
+- **在设备上发送批准指令** → 批准（`allow`）
+- **在设备上发送拒绝指令** → 拒绝（`deny`）
 
 设备不在线？ccbb 超时后自动 fail-open，CC 弹出自己的对话框。
 
@@ -166,6 +208,57 @@ uv run ccbb install
 
 ---
 
+## 设备开发指南
+
+### 基本流程
+
+1. **连接到 TCP 服务端**：连接到电脑的 IP 和端口
+2. **接收快照消息**：解析 JSON 格式的状态更新
+3. **显示审批请求**：当 `waiting > 0` 时，显示 `prompt` 中的信息
+4. **发送决策**：用户操作后，发送包含 `cmd`、`id` 和 `decision` 的 JSON
+
+### 最小实现示例
+
+```python
+import socket
+import json
+
+# 连接到服务端
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(("192.168.1.100", 9876))
+
+# 接收消息
+while True:
+    data = s.recv(1024)
+    if not data:
+        break
+    msg = json.loads(data.decode())
+    
+    # 检查是否有待审批请求
+    if msg.get("waiting", 0) > 0:
+        prompt = msg["prompt"]
+        print(f"审批请求: {prompt['tool']} - {prompt['hint']}")
+        
+        # 模拟用户输入
+        decision = input("批准(a)或拒绝(d)? ").strip().lower()
+        if decision == "a":
+            s.sendall(json.dumps({
+                "cmd": "permission",
+                "id": prompt["id"],
+                "decision": "once"
+            }).encode() + b"\n")
+        elif decision == "d":
+            s.sendall(json.dumps({
+                "cmd": "permission",
+                "id": prompt["id"],
+                "decision": "deny"
+            }).encode() + b"\n")
+
+s.close()
+```
+
+---
+
 ## macOS 开机自启（launchd）
 
 参考 `extras/` 目录下的示例 plist 文件，修改后放到 `~/Library/LaunchAgents/` 目录。
@@ -175,7 +268,7 @@ uv run ccbb install
 ## 开发
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/oh-myfun/claude-code-buddy-bridge
 cd claude-code-buddy-bridge
 uv sync --extra dev
 
@@ -190,7 +283,7 @@ uv run ccbb daemon -v
 
 ## 致谢
 
-原项目架构设计参考了 CharmYue/cc-buddy-bridge 和 cuiqingwei/claude-desktop-buddy-bridge。
+项目架构设计参考了 CharmYue/cc-buddy-bridge 和 cuiqingwei/claude-desktop-buddy-bridge。
 
 ---
 

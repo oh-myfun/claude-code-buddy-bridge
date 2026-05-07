@@ -54,13 +54,12 @@ ENTRIES_MAX = 5  # 设备显示的历史记录上限
 
 logger = logging.getLogger("ccbb.bridge")
 
-# ── 中文 sanitize（保护设备显示）───────────────────────────────────────────────
-_NON_ASCII = re.compile(r"[^\x00-\x7f]")
+# ── 文本截断（保护设备显示）───────────────────────────────────────────────
 
 
-def sanitize(text: str, max_len: int = 60) -> str:
-    """将非 ASCII 字符替换为 '?' 并截断，保护设备显示。"""
-    return _NON_ASCII.sub("?", text)[:max_len]
+def truncate(text: str, max_len: int = 60) -> str:
+    """截断文本，保护设备显示。"""
+    return text[:max_len]
 
 
 # ── 时区偏移（供设备时钟同步）────────────────────────────────────────────────
@@ -75,6 +74,7 @@ class PendingRequest:
     tool: str
     hint: str
     decision_future: asyncio.Future
+    context: Optional[dict] = None
 
 
 @dataclass
@@ -95,21 +95,24 @@ class BridgeState:
     def snapshot(self) -> dict:
         """生成发给设备的标准快照 payload。"""
         if self.pending is not None:
-            return {
+            snapshot = {
                 "total": 1,
                 "running": 0,
                 "waiting": 1,
-                "msg": sanitize(f"approve: {self.pending.tool}"),
+                "msg": truncate(f"approve: {self.pending.tool}"),
                 # 设备期望最旧在前 → reversed
                 "entries": list(reversed(self.entries[:ENTRIES_MAX])),
                 "tokens": 0,
                 "tokens_today": 0,
                 "prompt": {
                     "id": self.pending.id,
-                    "tool": sanitize(self.pending.tool),
-                    "hint": sanitize(self.pending.hint),
+                    "tool": truncate(self.pending.tool),
+                    "hint": truncate(self.pending.hint),
                 },
             }
+            if self.pending.context:
+                snapshot["context"] = self.pending.context
+            return snapshot
         return {
             "total": 0,
             "running": 0,
@@ -122,7 +125,7 @@ class BridgeState:
 
     def push_entry(self, text: str) -> None:
         ts = time.strftime("%H:%M")
-        self.entries.insert(0, f"{ts} {sanitize(text, 50)}")
+        self.entries.insert(0, f"{ts} {truncate(text, 50)}")
         self.entries = self.entries[:ENTRIES_MAX]
 
 
@@ -289,12 +292,13 @@ class Bridge:
         rid = str(req.get("id") or f"req_{int(time.time() * 1000)}")
         tool = str(req.get("tool") or "?")
         hint = str(req.get("hint") or "")
+        context = req.get("context") if isinstance(req.get("context"), dict) else None
 
         logger.info(f"收到请求 id={rid} tool={tool} hint={hint!r}")
 
         async with self._permission_lock:
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
-            self.state.pending = PendingRequest(id=rid, tool=tool, hint=hint, decision_future=fut)
+            self.state.pending = PendingRequest(id=rid, tool=tool, hint=hint, decision_future=fut, context=context)
             self.state.push_entry(f"{tool}: {hint}")
 
             try:

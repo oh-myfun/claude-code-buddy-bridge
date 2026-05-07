@@ -16,6 +16,7 @@ from typing import Optional
 class DeviceState:
     """模拟设备状态"""
     pending: Optional[dict] = None
+    context: Optional[dict] = None
     entries: list[str] = field(default_factory=list)
 
 
@@ -35,6 +36,14 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
             if cmd == 'q':
                 print("[设备] 退出…")
                 break
+            elif cmd == 'c' and state.context:
+                # 显示完整上下文
+                print(f"\n{'=' * 60}")
+                print(f"[设备] 完整上下文:")
+                print(f"{json.dumps(state.context, indent=2, ensure_ascii=False)}")
+                print(f"{'=' * 60}\n")
+                if state.pending:
+                    print("请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
             elif cmd == 'a' and state.pending:
                 # 发送允许
                 resp = {
@@ -46,6 +55,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
                 state.pending = None
+                state.context = None
             elif cmd == 'd' and state.pending:
                 # 发送拒绝
                 resp = {
@@ -57,8 +67,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
                 state.pending = None
+                state.context = None
             elif state.pending:
-                print("请选择: [A]允许  [D]拒绝  [Q]退出")
+                print("请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
             else:
                 print("当前无待审批请求，请输入命令")
 
@@ -118,15 +129,19 @@ async def main():
                     state.entries = msg.get("entries", [])
                     if msg.get("waiting", 0) > 0:
                         state.pending = msg.get("prompt", {})
-                        print(f"\n{'=' * 50}")
+                        state.context = msg.get("context")
+                        print(f"\n{'=' * 60}")
                         print(f"[设备] 收到审批请求!")
                         print(f"  ID: {state.pending.get('id')}")
                         print(f"  工具: {state.pending.get('tool')}")
                         print(f"  提示: {state.pending.get('hint')}")
-                        print(f"{'=' * 50}")
-                        print(f"请选择: [A]允许  [D]拒绝  [Q]退出")
+                        if state.context:
+                            print(f"  提示: 按 [C] 查看完整上下文")
+                        print(f"{'=' * 60}")
+                        print(f"请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
                     else:
                         state.pending = None
+                        state.context = None
                         print(f"[设备] 当前无待审批请求")
                         if state.entries:
                             print(f"[设备] 历史记录:")

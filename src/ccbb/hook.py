@@ -139,6 +139,7 @@ def main() -> None:
         "id": str(tool_use_id),
         "tool": str(tool_name),
         "hint": _make_hint(tool_input),
+        "context": event,
     }
     payload = (json.dumps(req, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 

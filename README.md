@@ -38,7 +38,8 @@ flowchart TD
 - **TCP 网络通信**：使用标准 TCP/IP 协议，跨平台、跨设备兼容
 - **多设备支持**：手机、嵌入式设备、单片机等任何支持 TCP 的设备均可连接
 - **支持多设备同时连接**：多个设备可以同时连接并接收审批请求
-- **中文安全**：所有发往设备的字符串自动 sanitize，避免特殊字符问题
+- **完整上下文传递**：所有 Claude Code Hook 的原始信息都会传递给设备
+- **支持多语言**：不再有中文等非 ASCII 字符的限制
 - **并发串行**：多个并发 hook 请求排队，不会同时争抢设备
 - **EOF 竞争检测**：若 CC 提前终止 hook 进程，立即清空设备显示，不会傻等超时
 
@@ -183,9 +184,18 @@ uv run ccbb install
     "id": "req_12345",
     "tool": "Bash",
     "hint": "ls -la"
+  },
+  "context": {
+    "tool_use_id": "req_12345",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "ls -la"
+    }
   }
 }
 ```
+
+**context 字段**（可选）：包含 Claude Code Hook 的完整原始信息，设备可以根据需要展示或使用此信息。
 
 ### 从设备到服务端
 

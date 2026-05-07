@@ -1,11 +1,11 @@
 """
-cdbb.cli — 命令行入口
+ccb.cli — 命令行入口
 
 用法:
-  cdbb daemon                  启动守护进程（连接 TCP 设备，监听 Unix Socket）
-  cdbb install                 自动注入 Claude Code hook 配置
-  cdbb uninstall               移除 Claude Code hook 配置
-  cdbb status                  检查守护进程是否在线
+  ccb daemon                  启动守护进程（作为 TCP 服务端，监听设备连接）
+  ccb install                 自动注入 Claude Code hook 配置
+  ccb uninstall               移除 Claude Code hook 配置
+  ccb status                  检查守护进程是否在线
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import socket
 import sys
 from pathlib import Path
 
-from cdbb import __version__
+from ccb import __version__
 
 
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ def _setup_logging(verbose: bool = False) -> None:
 
 def cmd_daemon(args: argparse.Namespace) -> None:
     _setup_logging(args.verbose)
-    from cdbb.bridge import run
+    from ccb.bridge import run
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
@@ -47,11 +47,11 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 # ── 子命令：status ─────────────────────────────────────────────────────────────
 
 def cmd_status(_args: argparse.Namespace) -> None:
-    from cdbb.bridge import SOCKET_PATH
+    from ccb.bridge import SOCKET_PATH
     sock_path = Path(SOCKET_PATH)
 
     if not sock_path.exists():
-        print("● cdbb 守护进程：未运行（socket 文件不存在）")
+        print("● ccb 守护进程：未运行（socket 文件不存在）")
         sys.exit(1)
 
     try:
@@ -59,9 +59,9 @@ def cmd_status(_args: argparse.Namespace) -> None:
         s.settimeout(1.0)
         s.connect(SOCKET_PATH)
         s.close()
-        print("● cdbb 守护进程：运行中 ✓")
+        print("● ccb 守护进程：运行中 ✓")
     except (ConnectionRefusedError, socket.timeout, OSError):
-        print("● cdbb 守护进程：socket 存在但无响应（可能已崩溃）")
+        print("● ccb 守护进程：socket 存在但无响应（可能已崩溃）")
         sys.exit(1)
 
 
@@ -70,7 +70,7 @@ def cmd_status(_args: argparse.Namespace) -> None:
 def cmd_install(args: argparse.Namespace) -> None:
     _setup_logging()
 
-    hook_script = Path(sys.executable).parent / "cdbb-hook"
+    hook_script = Path(sys.executable).parent / "ccb-hook"
     # 如果是 uv 安装，尝试找到 hook.py 的绝对路径
     hook_py = Path(__file__).parent / "hook.py"
 
@@ -104,20 +104,20 @@ def cmd_install(args: argparse.Namespace) -> None:
     hooks_block = existing.setdefault("hooks", {})
     permission_hooks = hooks_block.setdefault("PermissionRequest", [])
 
-    # 检查是否已存在 cdbb 条目
+    # 检查是否已存在 ccb 条目
     already = any(
-        h.get("command", "").find("claude-desktop-buddy-bridge") >= 0
+        h.get("command", "").find("claude-code-buddy") >= 0
         for entry in permission_hooks
         for h in entry.get("hooks", [])
     )
     if already and not args.force:
-        print("cdbb hook 已存在，无需重复安装。使用 --force 强制覆盖。")
+        print("ccb hook 已存在，无需重复安装。使用 --force 强制覆盖。")
         return
 
     # 移除旧条目后追加新条目
     permission_hooks[:] = [
         e for e in permission_hooks
-        if not any(h.get("command", "").find("claude-desktop-buddy-bridge") >= 0 for h in e.get("hooks", []))
+        if not any(h.get("command", "").find("claude-code-buddy") >= 0 for h in e.get("hooks", []))
     ]
 
     for matcher in matchers:
@@ -130,11 +130,11 @@ def cmd_install(args: argparse.Namespace) -> None:
         json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    print(f"✓ cdbb hook 已写入 {settings_path}")
+    print(f"✓ ccb hook 已写入 {settings_path}")
     print(f"  命令: {command}")
     print(f"  覆盖范围: {'所有工具' if not args.tools else ', '.join(args.tools)}")
     print()
-    print("下一步：运行 'cdbb daemon' 启动守护进程，然后开启 Claude Code。")
+    print("下一步：运行 'ccb daemon' 启动守护进程，然后开启 Claude Code。")
 
 
 # ── 子命令：uninstall ─────────────────────────────────────────────────────────
@@ -157,44 +157,44 @@ def cmd_uninstall(_args: argparse.Namespace) -> None:
     before = len(permission_hooks)
     permission_hooks[:] = [
         e for e in permission_hooks
-        if not any(h.get("command", "").find("claude-desktop-buddy-bridge") >= 0 for h in e.get("hooks", []))
+        if not any(h.get("command", "").find("claude-code-buddy") >= 0 for h in e.get("hooks", []))
     ]
     after = len(permission_hooks)
 
     if before == after:
-        print("未找到 cdbb hook 条目，无需操作。")
+        print("未找到 ccb hook 条目，无需操作。")
         return
 
     settings_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    print(f"✓ 已移除 {before - after} 条 cdbb hook（{settings_path}）")
+    print(f"✓ 已移除 {before - after} 条 ccb hook（{settings_path}）")
 
 
 # ── 参数解析 ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="claude-desktop-buddy-bridge",
-        description="claude-desktop-buddy-bridge — Claude Code CLI ↔ TCP 物理审批按钮",
+        prog="claude-code-buddy",
+        description="claude-code-buddy — Claude Code CLI ←─ TCP ── 设备作为客户端",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  cdbb install                 # 注入 hook（覆盖所有工具）
-  cdbb install --tools Bash    # 只拦截 Bash 工具
-  cdbb daemon                  # 启动守护进程（连接默认 127.0.0.1:9876）
-  cdbb daemon -v               # 调试模式（显示详细日志）
-  cdbb status                  # 检查守护进程是否在线
-  cdbb uninstall               # 移除 hook
-  CDBB_TCP_HOST=192.168.1.100 CDBB_TCP_PORT=8888 cdbb daemon  # 自定义 TCP 地址
+  ccb install                 # 注入 hook（覆盖所有工具）
+  ccb install --tools Bash    # 只拦截 Bash 工具
+  ccb daemon                  # 启动守护进程（TCP 服务端监听 0.0.0.0:9876）
+  ccb daemon -v               # 调试模式（显示详细日志）
+  ccb status                  # 检查守护进程是否在线
+  ccb uninstall               # 移除 hook
+  CCB_TCP_HOST=192.168.1.100 CCB_TCP_PORT=8888 ccb daemon  # 自定义监听地址
 """,
     )
-    parser.add_argument("-V", "--version", action="version", version=f"claude-desktop-buddy-bridge {__version__}")
+    parser.add_argument("-V", "--version", action="version", version=f"claude-code-buddy {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     # daemon
-    p_daemon = sub.add_parser("daemon", help="启动 TCP 守护进程")
+    p_daemon = sub.add_parser("daemon", help="启动 TCP 守护进程（作为服务端）")
     p_daemon.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
     p_daemon.set_defaults(func=cmd_daemon)
 

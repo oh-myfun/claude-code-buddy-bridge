@@ -1,5 +1,5 @@
 """
-cdbb.bridge — 守护进程核心
+ccb.bridge — 守护进程核心
 
 架构说明
 --------
@@ -8,12 +8,10 @@ cdbb.bridge — 守护进程核心
   Claude Code CLI
       │ PreToolUse hook（每次工具调用触发）
       ▼
-  Unix Socket  (/tmp/cdbb.sock)
+  Unix Socket  (/tmp/ccb.sock
       │
       ▼
-  Bridge（本模块）── TCP ──► 客户端设备
-      │                      │
-      │◄─────── 按键决策（once/deny）──┘
+  Bridge（本模块 - TCP 服务端）◄─── TCP ─── 设备（TCP 客户端
       │
       ▼
   把 decision 写回 hook 进程 → hook 输出 CC 协议 JSON → Claude Code 继续
@@ -23,16 +21,15 @@ cdbb.bridge — 守护进程核心
 1. permission_lock 串行化并发请求，第二个请求在第一个审批完成后才弹出。
 2. EOF 竞争检测：若 hook 进程提前退出（用户 Esc / CC 超时），立即清空设备
    显示，而不是傻等 PERMISSION_TIMEOUT。
-3. 心跳写入失败计数：连续 HEARTBEAT_FAIL_LIMIT 次失败后 os._exit(1)，
-   由 launchd/systemd 重启（os._exit 绕过 asyncio 清理，避免死锁）。
-4. Fail-open：bridge 不在线时 hook 退出码 0 且无输出，CC 走自己的对话框。
+3. 心跳发送到所有连接的设备。
+4. Fail-open：bridge 未运行时，CC 走自己的权限对话框。
 
 额外改进
 --------
-- 支持 TCP 通信替代 BLE，更通用
-- 中文字符全部 sanitize（保护设备显示）
-- entries 顺序修正（设备期望最旧在前，hook 上报最新在前，此处 reversed）
-- 通过环境变量 CDBB_TCP_HOST / CDBB_TCP_PORT 配置 TCP 连接
+- 电脑作为 TCP 服务端，设备主动连接
+- 支持多个设备可同时连接
+- 中文安全：所有发往设备的字符串自动 sanitize，避免特殊字符问题
+- 通过环境变量 CCB_TCP_HOST / CCB_TCP_PORT 配置 TCP 服务端监听地址
 """
 
 from __future__ import annotations
@@ -45,28 +42,28 @@ import re
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Set
 
 # ── TCP 常量 ───────────────────────────────────────────────────────────────────
-TCP_HOST_DEFAULT = "127.0.0.1"
+TCP_HOST_DEFAULT = "0.0.0.0"  # 监听所有网络接口
 TCP_PORT_DEFAULT = 9876
-SOCKET_PATH      = "/tmp/cdbb.sock"
-HEARTBEAT_INTERVAL = 3.0            # 秒，与官方桌面端保持一致
-HEARTBEAT_FAIL_LIMIT = 5            # 连续失败次数超限后自退出
-PERMISSION_TIMEOUT   = 110.0        # 秒，必须小于 CC hook 超时（120s）
-ENTRIES_MAX          = 5            # 设备显示的历史条目上限
+SOCKET_PATH = "/tmp/ccb.sock"
+HEARTBEAT_INTERVAL = 3.0  # 秒
+PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
+ENTRIES_MAX = 5  # 设备显示的历史记录上限
 
-logger = logging.getLogger("cdbb.bridge")
+logger = logging.getLogger("ccb.bridge")
 
 # ── 中文 sanitize（保护设备显示）───────────────────────────────────────────────
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
+
 
 def sanitize(text: str, max_len: int = 60) -> str:
     """将非 ASCII 字符替换为 '?' 并截断，保护设备显示。"""
     return _NON_ASCII.sub("?", text)[:max_len]
 
 
-# ── 时区偏移（供设备时钟同步）──────────────────────────────────────────────────
+# ── 时区偏移（供设备时钟同步）────────────────────────────────────────────────
 def _tz_offset_seconds() -> int:
     return -time.altzone if time.daylight and time.localtime().tm_isdst else -time.timezone
 
@@ -81,10 +78,19 @@ class PendingRequest:
 
 
 @dataclass
+class DeviceConnection:
+    """表示一个连接的设备"""
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    addr: tuple
+
+
+@dataclass
 class BridgeState:
     """所有可观测状态集中在一处，方便序列化为 TCP 快照。"""
     pending: Optional[PendingRequest] = None
     entries: list[str] = field(default_factory=list)
+    devices: Set[DeviceConnection] = field(default_factory=set)
 
     def snapshot(self) -> dict:
         """生成发给设备的标准快照 payload。"""
@@ -124,105 +130,122 @@ class BridgeState:
 class Bridge:
     def __init__(self) -> None:
         self.state = BridgeState()
-        self._rx_buf = bytearray()
-        self._tx_queue: asyncio.Queue[dict] = asyncio.Queue()
-        self._write_lock = asyncio.Lock()
         self._permission_lock = asyncio.Lock()
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
 
-    # ── TCP 收发 ────────────────────────────────────────────────────────────────
-
-    def set_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """设置 TCP 连接。"""
-        self._reader = reader
-        self._writer = writer
-
-    async def receive_loop(self) -> None:
-        """设备 → 主机：接收并解析 TCP 数据。"""
-        if not self._reader:
-            return
-
+    async def send_to_device(self, device: DeviceConnection, obj: dict) -> None:
+        """发送消息到单个设备"""
         try:
+            payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+            device.writer.write(payload)
+            await device.writer.drain()
+        except Exception as e:
+            logger.warning(f"发送消息到设备 {device.addr} 失败: {e}")
+            self._remove_device(device)
+
+    async def broadcast(self, obj: dict) -> None:
+        """广播消息到所有连接的设备"""
+        disconnected = []
+        for device in list(self.state.devices):
+            try:
+                payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+                device.writer.write(payload)
+                await device.writer.drain()
+            except Exception as e:
+                logger.warning(f"广播消息到设备 {device.addr} 失败: {e}")
+                disconnected.append(device)
+        
+        for device in disconnected:
+            self._remove_device(device)
+
+    async def push_snapshot(self) -> None:
+        """推送快照到所有设备"""
+        await self.broadcast(self.state.snapshot())
+
+    def _remove_device(self, device: DeviceConnection) -> None:
+        """移除断开的设备"""
+        if device in self.state.devices:
+            self.state.devices.remove(device)
+            try:
+                device.writer.close()
+            except:
+                pass
+            logger.info(f"设备断开连接: {device.addr}")
+
+    async def handle_device_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """处理新设备连接"""
+        addr = writer.get_extra_info("peername")
+        logger.info(f"新设备连接: {addr}")
+        
+        device = DeviceConnection(reader=reader, writer=writer, addr=addr)
+        self.state.devices.add(device)
+        
+        # 发送时间同步
+        try:
+            await self.send_to_device(device, {"time": [int(time.time()), _tz_offset_seconds()]})
+            # 发送当前状态
+            await self.send_to_device(device, self.state.snapshot())
+        except Exception as e:
+            logger.warning(f"发送初始消息到设备 {addr} 失败: {e}")
+            self._remove_device(device)
+            return
+        
+        # 持续接收设备消息
+        try:
+            rx_buf = bytearray()
             while True:
-                data = await self._reader.read(4096)
+                data = await reader.read(4096)
                 if not data:
-                    logger.warning("TCP 连接已断开")
                     break
-                self._rx_buf.extend(data)
+                rx_buf.extend(data)
+                
                 while True:
-                    nl = self._rx_buf.find(b"\n")
+                    nl = rx_buf.find(b"\n")
                     if nl < 0:
                         break
-                    line = bytes(self._rx_buf[:nl])
-                    del self._rx_buf[: nl + 1]
+                    line = bytes(rx_buf[:nl])
+                    del rx_buf[:nl + 1]
                     if not line.strip():
                         continue
                     try:
-                        obj = json.loads(line.decode("utf-8"))
+                        msg = json.loads(line.decode("utf-8"))
                     except Exception as e:
-                        logger.warning("设备消息解析失败: %r — %s", line, e)
+                        logger.warning(f"设备 {addr} 消息解析失败: {line!r} — {e}")
                         continue
-                    logger.debug("设备 → 主机: %s", json.dumps(obj, ensure_ascii=False))
-                    self._tx_queue.put_nowait(obj)
+                    logger.debug(f"设备 {addr} → 主机: {json.dumps(msg, ensure_ascii=False)}")
+                    
+                    if msg.get("cmd") == "permission":
+                        await self._handle_permission_decision(msg)
+                        
         except Exception as e:
-            logger.error("接收循环异常: %s", e)
+            logger.error(f"设备连接处理异常: {e}")
+        finally:
+            self._remove_device(device)
 
-    async def send(self, obj: dict) -> None:
-        """主机 → 设备：序列化为 JSON 行，通过 TCP 发出。"""
-        if not self._writer:
-            raise RuntimeError("TCP 连接未建立")
+    async def _handle_permission_decision(self, msg: dict) -> None:
+        """处理设备的审批决策"""
+        mid = msg.get("id")
+        decision = msg.get("decision")
         
-        payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
-        async with self._write_lock:
-            self._writer.write(payload)
-            await self._writer.drain()
-
-    async def push_snapshot(self) -> None:
-        await self.send(self.state.snapshot())
-
-    # ── 后台任务 ───────────────────────────────────────────────────────────────
+        # 发送确认到设备
+        try:
+            await self.broadcast({"ack": "permission", "ok": True, "n": 0})
+        except Exception as e:
+            logger.warning("permission ack 广播失败: %s", e)
+            
+        pending = self.state.pending
+        if pending and pending.id == mid and not pending.decision_future.done():
+            pending.decision_future.set_result(decision)
+        else:
+            logger.warning(f"收到孤立 permission id={mid!r} decision={decision!r}")
 
     async def heartbeat_loop(self) -> None:
-        """每 HEARTBEAT_INTERVAL 秒推送快照；连续失败则自退出让 supervisor 重启。"""
-        consecutive_failures = 0
+        """定期广播心跳/快照"""
         while True:
             try:
                 await self.push_snapshot()
-                consecutive_failures = 0
             except Exception as e:
-                consecutive_failures += 1
-                logger.warning(
-                    "心跳写入失败 (%d/%d): %s",
-                    consecutive_failures, HEARTBEAT_FAIL_LIMIT, e,
-                )
-                if consecutive_failures >= HEARTBEAT_FAIL_LIMIT:
-                    logger.error("TCP 链路已死，退出等待重启…")
-                    os._exit(1)
+                logger.warning(f"心跳失败: {e}")
             await asyncio.sleep(HEARTBEAT_INTERVAL)
-
-    async def tx_dispatcher(self) -> None:
-        """处理设备发来的消息，当前只关心 permission 决策。"""
-        while True:
-            msg = await self._tx_queue.get()
-            cmd = msg.get("cmd")
-
-            if cmd == "permission":
-                # 先 ack，让设备清除 UI，再 resolve future
-                try:
-                    await self.send({"ack": "permission", "ok": True, "n": 0})
-                except Exception as e:
-                    logger.warning("permission ack 发送失败: %s", e)
-
-                mid = msg.get("id")
-                decision = msg.get("decision")
-                pending = self.state.pending
-
-                if pending and pending.id == mid:
-                    if not pending.decision_future.done():
-                        pending.decision_future.set_result(decision)
-                else:
-                    logger.warning("收到孤立 permission id=%r decision=%r", mid, decision)
 
     # ── Hook 客户端处理 ────────────────────────────────────────────────────────
 
@@ -237,7 +260,7 @@ class Bridge:
         时序：
           1. 读取请求 JSON（含 id / tool / hint）
           2. 获取 permission_lock（串行化并发请求）
-          3. 推送快照给设备，设备 UI 亮起
+          3. 推送快照给所有设备，设备 UI 亮起
           4. 同时等待：(a) 设备按键决策 或 (b) hook 进程 socket EOF
              — 先到先得，避免 hook 被 CC 提前 kill 后设备一直亮着
           5. 把 decision 写回 hook 进程
@@ -246,7 +269,7 @@ class Bridge:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
         except asyncio.TimeoutError:
-            logger.warning("[%s] 5 秒内未收到请求行", peer)
+            logger.warning(f"[{peer}] 5 秒内未收到请求行")
             writer.close()
             return
 
@@ -257,17 +280,17 @@ class Bridge:
         try:
             req = json.loads(raw.decode("utf-8"))
         except Exception as e:
-            logger.warning("[%s] JSON 解析失败: %s raw=%r", peer, e, raw)
+            logger.warning(f"[{peer}] JSON 解析失败: {e} raw={raw!r}")
             writer.write((json.dumps({"decision": "error", "error": "bad_json"}) + "\n").encode())
             await writer.drain()
             writer.close()
             return
 
-        rid  = str(req.get("id")   or f"req_{int(time.time() * 1000)}")
+        rid = str(req.get("id") or f"req_{int(time.time() * 1000)}")
         tool = str(req.get("tool") or "?")
         hint = str(req.get("hint") or "")
 
-        logger.info("收到请求 id=%s tool=%s hint=%r", rid, tool, hint)
+        logger.info(f"收到请求 id={rid} tool={tool} hint={hint!r}")
 
         async with self._permission_lock:
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -299,13 +322,13 @@ class Bridge:
                     decision = decision_task.result()
                 except asyncio.TimeoutError:
                     decision = "timeout"
-                    logger.warning("id=%s 审批超时，默认拒绝", rid)
+                    logger.warning(f"id={rid} 审批超时，默认拒绝")
             else:
                 # hook 进程先退出 → 立即清空设备显示
                 client_gone = True
                 decision = "abandoned"
                 decision_task.cancel()
-                logger.info("id=%s hook 进程已离开，清空设备显示", rid)
+                logger.info(f"id={rid} hook 进程已离开，清空设备显示")
 
             self.state.pending = None
 
@@ -314,7 +337,7 @@ class Bridge:
             except Exception as e:
                 logger.warning("清空快照推送失败: %s", e)
 
-        logger.info("id=%s → decision=%s", rid, decision)
+        logger.info(f"id={rid} → decision={decision}")
 
         if not client_gone:
             try:
@@ -329,21 +352,12 @@ class Bridge:
             pass
 
 
-# ── TCP 连接 ───────────────────────────────────────────────────────────────────
-
-async def connect_to_tcp_server(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """连接到 TCP 服务器（设备端）。"""
-    logger.info("正在连接 TCP 服务器 %s:%d …", host, port)
-    reader, writer = await asyncio.open_connection(host, port)
-    logger.info("已连接 TCP 服务器")
-    return reader, writer
-
-
 # ── 主入口 ─────────────────────────────────────────────────────────────────────
 
+
 async def run() -> None:
-    host = os.environ.get("CDBB_TCP_HOST", TCP_HOST_DEFAULT)
-    port = int(os.environ.get("CDBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
+    host = os.environ.get("CCB_TCP_HOST", TCP_HOST_DEFAULT)
+    port = int(os.environ.get("CCB_TCP_PORT", str(TCP_PORT_DEFAULT)))
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
@@ -361,29 +375,28 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
-    reader, writer = await connect_to_tcp_server(host, port)
     bridge = Bridge()
-    bridge.set_connection(reader, writer)
 
-    # 同步设备时钟
-    await bridge.send({"time": [int(time.time()), _tz_offset_seconds()]})
+    # 启动 TCP 服务端（监听设备连接）
+    device_server = await asyncio.start_server(
+        bridge.handle_device_connection, host, port
+    )
+    logger.info(f"TCP 服务端已启动，监听 {host}:{port}")
 
-    server = await asyncio.start_unix_server(
+    # 启动 Unix Socket 服务端（监听 hook 连接）
+    hook_server = await asyncio.start_unix_server(
         bridge.handle_hook_client, path=SOCKET_PATH
     )
     os.chmod(SOCKET_PATH, 0o600)
-    logger.info("Unix Socket 监听中: %s", SOCKET_PATH)
+    logger.info(f"Unix Socket 监听中: {SOCKET_PATH}")
 
-    hb_task   = asyncio.create_task(bridge.heartbeat_loop(),  name="heartbeat")
-    tx_task   = asyncio.create_task(bridge.tx_dispatcher(),   name="tx_dispatcher")
-    rx_task   = asyncio.create_task(bridge.receive_loop(),    name="receive_loop")
-    srv_task  = asyncio.create_task(server.serve_forever(),   name="unix_server")
-    stop_task = asyncio.create_task(stop_event.wait(),        name="stop_wait")
+    hb_task = asyncio.create_task(bridge.heartbeat_loop(), name="heartbeat")
+    stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
 
-    logger.info("claude-desktop-buddy-bridge 守护进程已就绪 ✓")
+    logger.info("claude-code-buddy 守护进程已就绪 ✓")
 
     done, pending = await asyncio.wait(
-        {hb_task, tx_task, rx_task, srv_task, stop_task},
+        {hb_task, stop_task},
         return_when=asyncio.FIRST_COMPLETED,
     )
 
@@ -394,21 +407,29 @@ async def run() -> None:
         if t is not stop_task and not t.cancelled():
             exc = t.exception()
             if exc:
-                logger.error("任务 %s 异常退出: %r", t.get_name(), exc)
+                logger.error(f"任务 {t.get_name()} 异常退出: {exc!r}")
 
-    server.close()
+    # 清理所有设备连接
+    for device in list(bridge.state.devices):
+        try:
+            device.writer.close()
+            await device.writer.wait_closed()
+        except:
+            pass
+
+    hook_server.close()
     try:
-        await server.wait_closed()
+        await hook_server.wait_closed()
     except Exception:
         pass
 
+    device_server.close()
     try:
-        writer.close()
-        await writer.wait_closed()
+        await device_server.wait_closed()
     except Exception:
         pass
 
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
-    logger.info("claude-desktop-buddy-bridge 已退出")
+    logger.info("claude-code-buddy 已退出")

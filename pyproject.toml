@@ -3,12 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-desktop-buddy-bridge"
+name = "claude-code-buddy"
 version = "0.1.0"
-description = "让设备成为 Claude Code CLI 的物理审批按钮 — 通过 TCP 通信"
+description = "让设备成为 Claude Code CLI 的物理审批按钮 — 电脑作为 TCP 服务端"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "claude-desktop-buddy-bridge contributors" }]
+authors = [{ name = "claude-code-buddy contributors" }]
 requires-python = ">=3.11"
 keywords = ["claude-code", "tcp", "hardware", "permission", "hook"]
 classifiers = [
@@ -24,10 +24,10 @@ dependencies = []
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-cdbb = "cdbb.cli:main"
+ccb = "ccb.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cdbb"]
+packages = ["src/ccb"]
 
 [tool.pytest.ini.options]
 asyncio_mode = "auto"

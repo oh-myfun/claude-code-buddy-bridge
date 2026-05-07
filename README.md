@@ -45,6 +45,17 @@ flowchart TD
 
 ---
 
+## 跨平台说明
+
+本项目支持 Windows、macOS 和 Linux 系统，**内部通信机制会自动适配**：
+
+| 系统 | hook → bridge 通信 | bridge → 设备通信 |
+|------|-------------------|------------------|
+| **Unix** | Unix Socket（优先）/ TCP | TCP |
+| **Windows** | TCP | TCP |
+
+Unix Socket 更高效安全（仅本地访问），Windows 使用 TCP（端口 9877）。**用户无需关心这些细节**，命令行工具完全相同。
+
 ## 支持的设备
 
 任何支持 TCP 客户端的设备都可以使用：

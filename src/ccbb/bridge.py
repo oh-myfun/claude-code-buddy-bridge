@@ -8,7 +8,7 @@ ccbb.bridge — 守护进程核心
   Claude Code CLI
       │ PreToolUse hook（每次工具调用触发）
       ▼
-  Unix Socket  (/tmp/ccbb.sock)
+  TCP Socket  (localhost:HOOK_PORT) 或 Unix Socket (/tmp/ccbb.sock)
       │
       ▼
   Bridge（本模块 - TCP 服务端）◄─── TCP ─── 设备（TCP 客户端）
@@ -28,8 +28,10 @@ ccbb.bridge — 守护进程核心
 --------
 - 电脑作为 TCP 服务端，设备主动连接
 - 支持多个设备可同时连接
-- 中文安全：所有发往设备的字符串自动 sanitize，避免特殊字符问题
-- 通过环境变量 CCBB_TCP_HOST / CCBB_TCP_PORT 配置 TCP 服务端监听地址
+- 支持完整 Unicode，不再限制中文字符
+- 跨平台支持：Windows (TCP) 和 Unix (Unix Socket/TCP)
+- 通过环境变量 CCBB_TCP_HOST / CCBB_TCP_PORT 配置设备连接端口
+- 通过环境变量 CCBB_HOOK_PORT 配置 hook 通信端口（Windows 使用 TCP）
 """
 
 from __future__ import annotations
@@ -38,20 +40,26 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Set
 
-# ── TCP 常量 ───────────────────────────────────────────────────────────────────
+# ── 跨平台常量 ───────────────────────────────────────────────────────────────────
+IS_WINDOWS = platform.system() == "Windows"
+
 TCP_HOST_DEFAULT = "0.0.0.0"  # 监听所有网络接口
-TCP_PORT_DEFAULT = 9876
-SOCKET_PATH = "/tmp/ccbb.sock"
+TCP_PORT_DEFAULT = 9876  # 设备连接端口
+HOOK_TCP_PORT_DEFAULT = 9877  # hook 连接端口（Windows 使用 TCP）
+SOCKET_PATH = "/tmp/ccbb.sock"  # Unix Socket 路径（Unix 系统使用）
 HEARTBEAT_INTERVAL = 3.0  # 秒
 PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
 ENTRIES_MAX = 5  # 设备显示的历史记录上限
 
 logger = logging.getLogger("ccbb.bridge")
+
 
 # ── 文本截断（保护设备显示）───────────────────────────────────────────────
 
@@ -155,7 +163,7 @@ class Bridge:
             except Exception as e:
                 logger.warning(f"广播消息到设备 {device.addr} 失败: {e}")
                 disconnected.append(device)
-        
+
         for device in disconnected:
             self._remove_device(device)
 
@@ -177,10 +185,10 @@ class Bridge:
         """处理新设备连接"""
         addr = writer.get_extra_info("peername")
         logger.info(f"新设备连接: {addr}")
-        
+
         device = DeviceConnection(reader=reader, writer=writer, addr=addr)
         self.state.devices.add(device)
-        
+
         # 发送时间同步
         try:
             await self.send_to_device(device, {"time": [int(time.time()), _tz_offset_seconds()]})
@@ -190,7 +198,7 @@ class Bridge:
             logger.warning(f"发送初始消息到设备 {addr} 失败: {e}")
             self._remove_device(device)
             return
-        
+
         # 持续接收设备消息
         try:
             rx_buf = bytearray()
@@ -199,7 +207,7 @@ class Bridge:
                 if not data:
                     break
                 rx_buf.extend(data)
-                
+
                 while True:
                     nl = rx_buf.find(b"\n")
                     if nl < 0:
@@ -214,10 +222,10 @@ class Bridge:
                         logger.warning(f"设备 {addr} 消息解析失败: {line!r} — {e}")
                         continue
                     logger.debug(f"设备 {addr} → 主机: {json.dumps(msg, ensure_ascii=False)}")
-                    
+
                     if msg.get("cmd") == "permission":
                         await self._handle_permission_decision(msg)
-                        
+
         except Exception as e:
             logger.error(f"设备连接处理异常: {e}")
         finally:
@@ -227,13 +235,13 @@ class Bridge:
         """处理设备的审批决策"""
         mid = msg.get("id")
         decision = msg.get("decision")
-        
+
         # 发送确认到设备
         try:
             await self.broadcast({"ack": "permission", "ok": True, "n": 0})
         except Exception as e:
             logger.warning("permission ack 广播失败: %s", e)
-            
+
         pending = self.state.pending
         if pending and pending.id == mid and not pending.decision_future.done():
             pending.decision_future.set_result(decision)
@@ -360,9 +368,11 @@ class Bridge:
 
 async def run() -> None:
     host = os.environ.get("CCBB_TCP_HOST", TCP_HOST_DEFAULT)
-    port = int(os.environ.get("CCBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
+    device_port = int(os.environ.get("CCBB_TCP_PORT", str(TCP_PORT_DEFAULT)))
+    hook_port = int(os.environ.get("CCBB_HOOK_PORT", str(HOOK_TCP_PORT_DEFAULT)))
 
-    if os.path.exists(SOCKET_PATH):
+    # 清理旧的 socket 文件（仅 Unix 系统）
+    if not IS_WINDOWS and os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
     stop_event = asyncio.Event()
@@ -372,26 +382,48 @@ async def run() -> None:
         stop_event.set()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+    # 信号处理（Unix 系统支持 SIGINT/SIGTERM，Windows 只支持 SIGINT）
+    if not IS_WINDOWS:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _stop)
+            except NotImplementedError:
+                pass
+    else:
+        # Windows: 使用 asyncio 的事件循环停止机制
         try:
-            loop.add_signal_handler(sig, _stop)
-        except NotImplementedError:
+            loop.add_signal_handler(signal.SIGINT, _stop)
+        except (NotImplementedError, ValueError):
+            # Windows 可能不支持某些信号处理
             pass
 
     bridge = Bridge()
 
     # 启动 TCP 服务端（监听设备连接）
     device_server = await asyncio.start_server(
-        bridge.handle_device_connection, host, port
+        bridge.handle_device_connection, host, device_port
     )
-    logger.info(f"TCP 服务端已启动，监听 {host}:{port}")
+    logger.info(f"TCP 服务端已启动，设备连接监听 {host}:{device_port}")
 
-    # 启动 Unix Socket 服务端（监听 hook 连接）
-    hook_server = await asyncio.start_unix_server(
-        bridge.handle_hook_client, path=SOCKET_PATH
-    )
-    os.chmod(SOCKET_PATH, 0o600)
-    logger.info(f"Unix Socket 监听中: {SOCKET_PATH}")
+    # 启动 hook 通信服务端
+    # Unix 系统：使用 Unix Socket（更安全、更高效）
+    # Windows 系统：使用 TCP Socket（Unix Socket 在 Windows 上不可用）
+    if IS_WINDOWS:
+        # Windows: 使用 TCP Socket
+        hook_server = await asyncio.start_server(
+            bridge.handle_hook_client, "127.0.0.1", hook_port
+        )
+        logger.info(f"TCP 服务端已启动，hook 通信监听 127.0.0.1:{hook_port}")
+        hook_server_sock_path = None
+    else:
+        # Unix: 使用 Unix Socket
+        hook_server = await asyncio.start_server(
+            bridge.handle_hook_client, path=SOCKET_PATH
+        )
+        os.chmod(SOCKET_PATH, 0o600)
+        logger.info(f"Unix Socket 监听中: {SOCKET_PATH}")
+        hook_server_sock_path = SOCKET_PATH
 
     hb_task = asyncio.create_task(bridge.heartbeat_loop(), name="heartbeat")
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
@@ -432,7 +464,8 @@ async def run() -> None:
     except Exception:
         pass
 
-    if os.path.exists(SOCKET_PATH):
-        os.unlink(SOCKET_PATH)
+    # 清理 socket 文件（仅 Unix 系统）
+    if not IS_WINDOWS and hook_server_sock_path and os.path.exists(hook_server_sock_path):
+        os.unlink(hook_server_sock_path)
 
     logger.info("claude-code-buddy-bridge 已退出")

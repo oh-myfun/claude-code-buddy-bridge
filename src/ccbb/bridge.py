@@ -44,6 +44,7 @@ import os
 import random
 import signal
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Set, Dict
 
@@ -101,7 +102,16 @@ class DeviceConnection:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     addr: tuple
+    uid: str  # 唯一标识符，用于 set 集合
     pairing_code: Optional[str] = None  # 配对码，配对前为 None
+
+    def __hash__(self) -> int:
+        return hash(self.uid)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, DeviceConnection):
+            return self.uid == other.uid
+        return False
 
 
 @dataclass
@@ -280,7 +290,7 @@ class Bridge:
         addr = writer.get_extra_info("peername")
         logger.info(f"新设备连接: {addr}")
 
-        device = DeviceConnection(reader=reader, writer=writer, addr=addr)
+        device = DeviceConnection(reader=reader, writer=writer, addr=addr, uid=str(uuid.uuid4()))
         self._unpaired_devices.add(device)
 
         # 发送初始消息（提示输入配对码）

@@ -68,7 +68,7 @@ flowchart TD
 
 ## 配对机制
 
-系统支持多个 Claude Code 终端与多个审批设备配对，通过 6 位随机配对码建立一一对应关系：
+系统支持多个 Claude Code 终端与多个审批设备配对，通过 6 位配对码建立一一对应关系。配对码基于 session_id 生成，确保同一 session 的所有审批请求都能路由到正确的设备：
 
 ```mermaid
 sequenceDiagram
@@ -77,19 +77,22 @@ sequenceDiagram
     participant Bridge as ccbb daemon
     participant Device as 审批设备
 
-    CC->>Hook: 触发权限请求
-    Hook->>Bridge: {"action": "get_pairing_code"}
-    Bridge-->>Hook: {"pairing_code": "123456"}
-    Hook-->>CC: 显示配对码
-    Note over CC: 用户在 Claude Code 中看到配对码
+    Note over CC: Session 开始
+    CC->>Hook: SessionStart 事件
+    Hook->>Bridge: {"action": "session_start", "session_id": "abc123..."}
+    Bridge-->>Hook: {"pairing_code": "456789"}
+    Hook-->>CC: 显示配对码: 456789
+    Note over CC: 用户在 Claude Code 终端看到配对码
     
     Device->>Bridge: 连接 TCP
     Bridge-->>Device: {"cmd": "waiting_pairing"}
-    Device->>Bridge: {"cmd": "pair", "pairing_code": "123456"}
-    Bridge-->>Device: {"cmd": "paired"}
-    Note over Bridge: 配对成功，建立联系
+    Device->>Bridge: {"cmd": "pair", "pairing_code": "456789"}
+    Bridge-->>Device: {"cmd": "paired", "session_id": "abc123..."}
+    Note over Bridge: 配对成功，session 与设备绑定
     
-    Hook->>Bridge: {"id": "...", "tool": "Bash", "hint": "..."}
+    Note over CC: 触发权限请求
+    CC->>Hook: PermissionRequest 事件
+    Hook->>Bridge: {"session_id": "abc123...", "tool": "Bash", ...}
     Bridge-->>Device: {"waiting": 1, "prompt": {...}}
     Device->>Bridge: {"cmd": "permission", "id": "...", "decision": "once"}
     Bridge-->>Hook: {"decision": "once"}
@@ -98,31 +101,43 @@ sequenceDiagram
 
 **配对流程说明**：
 
-1. **Claude Code 发起连接**：当触发需要审批的操作时，Hook 脚本连接到 Bridge 并获取配对码
-2. **显示配对码**：配对码显示在 Claude Code 界面上
+1. **Session 开始**：当 Claude Code 启动新 session 时，SessionStart hook 触发
+2. **生成配对码**：Bridge 基于 session_id 生成 6 位配对码，并显示在终端
 3. **设备输入配对码**：用户在审批设备上输入配对码并发送配对请求
-4. **建立配对关系**：Bridge 验证配对码，建立 Hook 与设备的配对关系
-5. **审批请求定向发送**：后续的审批请求只发送给配对的设备
-6. **决策响应定向返回**：设备的决策响应只返回给配对的 Claude Code 终端
+4. **建立配对关系**：Bridge 验证配对码，将设备与 session 绑定
+5. **审批请求**：当 PermissionRequest 触发时，使用 session_id 查找配对的设备
+6. **决策响应**：设备的决策响应返回给对应 session 的 Hook
 
 **配对特性**：
 
-- 一个 Hook（Claude Code 终端）在配对后只能与一个设备通信
-- 一个设备在配对后只能处理一个 Hook 的请求
-- 配对关系在任意一方断开连接后自动解除
-- 未配对的 Hook 会等待设备配对（最多 60 秒）
+- **基于 session_id**：配对码与 session_id 绑定，同一 session 的所有审批请求都能正确路由
+- **确定性生成**：相同 session_id 总是生成相同配对码，便于记忆
+- **多终端支持**：不同 session 有不同配对码，支持多个 Claude Code 终端同时运行
+- **设备绑定**：一个设备配对后只能处理对应 session 的请求
 
 ---
 
 ## 快速开始
 
-### 1. 启动守护进程（电脑作为服务端）
-
-首先在电脑上运行 ccbb daemon：
+### 1. 安装并注入 Hook
 
 ```bash
 cd /workspace
 uv sync
+uv run ccbb install
+# 只拦截 Bash 工具（更精准）：
+# uv run ccbb install --tools Bash
+```
+
+这条命令会自动在 `~/.claude/settings.json` 中写入配置，包括：
+- **SessionStart hook**：在 session 开始时显示配对码
+- **PermissionRequest hook**：处理审批请求
+
+### 2. 启动守护进程（电脑作为服务端）
+
+在电脑上运行 ccbb daemon：
+
+```bash
 uv run ccbb daemon
 ```
 
@@ -131,7 +146,19 @@ uv run ccbb daemon
 CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 uv run ccbb daemon
 ```
 
-### 2. 连接设备（作为 TCP 客户端）
+### 3. 启动 Claude Code
+
+打开 Claude Code，终端会显示类似以下信息：
+
+```
+==================================================
+  Claude Code Buddy Bridge
+  设备配对码: 456789
+  请在审批设备上输入此配对码
+==================================================
+```
+
+### 4. 连接设备（作为 TCP 客户端）
 
 任何支持 TCP 的设备都可以连接。以下是几种连接方式：
 
@@ -145,6 +172,8 @@ python3 examples/tcp_device_client.py
 ```bash
 CCBB_TCP_HOST=192.168.1.100 CCBB_TCP_PORT=8888 python3 examples/tcp_device_client.py
 ```
+
+在客户端输入终端显示的配对码（如 `456789`）完成配对。
 
 #### 方式二：使用手机 App
 
@@ -169,24 +198,17 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) { delay(500); }
   
   if (client.connect(host, port)) {
-    client.println("{\"cmd\": \"permission\", \"id\": \"test\", \"decision\": \"once\"}");
+    // 先配对
+    client.println("{\"cmd\": \"pair\", \"pairing_code\": \"456789\"}");
+    // 等待配对成功后，可以发送审批决策
+    // client.println("{\"cmd\": \"permission\", \"id\": \"...\", \"decision\": \"once\"}");
   }
 }
 ```
 
-### 3. 注入 Claude Code Hook
+### 5. 使用
 
-```bash
-uv run ccbb install
-# 只拦截 Bash 工具（更精准）：
-# uv run ccbb install --tools Bash
-```
-
-这条命令会自动在 `~/.claude/settings.json` 中写入配置。
-
-### 4. 使用
-
-打开 Claude Code，触发一个需要审批的操作（如执行 Bash 命令）：
+当 Claude Code 需要审批时：
 
 - **在设备上发送批准指令** → 批准（`allow`）
 - **在设备上发送拒绝指令** → 拒绝（`deny`）
@@ -227,8 +249,39 @@ Bridge 通过第一条消息自动识别连接类型：
 
 | 消息特征 | 连接类型 |
 |---------|---------|
-| 包含 `"tool"` 字段或 `"action": "get_pairing_code"` | Hook 连接（Claude Code） |
+| 包含 `"action": "session_start"` 或 `"session_id"` 字段 | Hook 连接（Claude Code） |
 | 包含 `"cmd": "pair"` 或 `"cmd": "permission"` | 设备连接 |
+
+### 从 Hook 到服务端
+
+**SessionStart 事件**：
+```json
+{
+  "action": "session_start",
+  "session_id": "abc123def456..."
+}
+```
+
+**响应**：
+```json
+{"pairing_code": "456789"}
+```
+
+**PermissionRequest 事件**：
+```json
+{
+  "session_id": "abc123def456...",
+  "id": "req_12345",
+  "tool": "Bash",
+  "hint": "ls -la",
+  "context": {...}
+}
+```
+
+**响应**：
+```json
+{"decision": "once"}  // 或 "deny"、"timeout"
+```
 
 ### 从服务端到设备
 
@@ -239,7 +292,7 @@ Bridge 通过第一条消息自动识别连接类型：
 
 **配对成功**：
 ```json
-{"cmd": "paired", "pairing_code": "123456"}
+{"cmd": "paired", "pairing_code": "456789", "session_id": "abc123..."}
 ```
 
 **配对失败**：
@@ -247,17 +300,7 @@ Bridge 通过第一条消息自动识别连接类型：
 {"cmd": "pairing_failed", "reason": "配对码无效或已过期"}
 ```
 
-**配对解除**（Hook 断开时）：
-```json
-{"cmd": "unpaired"}
-```
-
-**时间同步**：
-```json
-{"time": [1234567890, 28800]}
-```
-
-**快照（状态更新）**：
+**快照（审批请求）**：
 ```json
 {
   "total": 1,
@@ -272,17 +315,9 @@ Bridge 通过第一条消息自动识别连接类型：
     "tool": "Bash",
     "hint": "ls -la"
   },
-  "context": {
-    "tool_use_id": "req_12345",
-    "tool_name": "Bash",
-    "tool_input": {
-      "command": "ls -la"
-    }
-  }
+  "context": {...}
 }
 ```
-
-**context 字段**（可选）：包含 Claude Code Hook 的完整原始信息，设备可以根据需要展示或使用此信息。
 
 **确认响应**（收到审批决策后）：
 ```json
@@ -291,11 +326,11 @@ Bridge 通过第一条消息自动识别连接类型：
 
 ### 从设备到服务端
 
-**配对请求**（设备必须先配对才能发送审批决策）：
+**配对请求**：
 ```json
 {
   "cmd": "pair",
-  "pairing_code": "123456"
+  "pairing_code": "456789"
 }
 ```
 
@@ -308,36 +343,9 @@ Bridge 通过第一条消息自动识别连接类型：
 }
 ```
 
-决策值可以是：
+决策值：
 - `once`：批准
 - `deny`：拒绝
-
-### 从 Hook 到服务端
-
-**获取配对码**：
-```json
-{"action": "get_pairing_code"}
-```
-
-**响应**：
-```json
-{"pairing_code": "123456"}
-```
-
-**审批请求**：
-```json
-{
-  "id": "req_12345",
-  "tool": "Bash",
-  "hint": "ls -la",
-  "context": {...}
-}
-```
-
-**响应**：
-```json
-{"decision": "once"}  // 或 "deny"、"timeout"
-```
 
 ---
 
@@ -347,9 +355,9 @@ Bridge 通过第一条消息自动识别连接类型：
 
 1. **连接到 TCP 服务端**：连接到电脑的 IP 和端口
 2. **接收等待配对消息**：服务端发送 `{"cmd": "waiting_pairing"}`
-3. **输入配对码**：用户在设备上输入 Claude Code 显示的 6 位配对码
-4. **发送配对请求**：发送 `{"cmd": "pair", "pairing_code": "123456"}`
-5. **等待配对成功**：服务端返回 `{"cmd": "paired"}`
+3. **输入配对码**：用户在设备上输入 Claude Code 终端显示的 6 位配对码
+4. **发送配对请求**：发送 `{"cmd": "pair", "pairing_code": "456789"}`
+5. **等待配对成功**：服务端返回 `{"cmd": "paired", "session_id": "abc123..."}`
 6. **接收审批请求**：当有待审批请求时，服务端发送快照消息
 7. **发送决策**：用户操作后，发送包含 `cmd`、`id` 和 `decision` 的 JSON
 

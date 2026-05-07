@@ -84,19 +84,25 @@ def _emit_deny(message: str) -> None:
 
 # ── 与守护进程通信 ─────────────────────────────────────────────────────────────
 
-def _ask_bridge(payload: bytes) -> str | None:
+def _connect_to_bridge() -> socket.socket | None:
     """
-    向守护进程发送请求，等待决策字符串。
-    任何异常（包括守护进程未运行）都返回 None → fail-open。
+    建立到守护进程的 TCP 连接。
+    任何异常都返回 None → fail-open。
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    except OSError:
-        return None
-
-    try:
         s.settimeout(CONNECT_TIMEOUT)
         s.connect((HOOK_HOST, HOOK_PORT))
+        return s
+    except (socket.timeout, OSError, ConnectionRefusedError):
+        return None
+
+
+def _send_request(s: socket.socket, payload: bytes) -> dict | None:
+    """
+    通过已建立的连接发送请求并接收响应。
+    """
+    try:
         s.sendall(payload)
         s.settimeout(READ_TIMEOUT)
 
@@ -107,25 +113,35 @@ def _ask_bridge(payload: bytes) -> str | None:
                 break
             buf.extend(chunk)
 
-    except (socket.timeout, OSError, ConnectionRefusedError):
-        return None
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
+        line = bytes(buf).split(b"\n", 1)[0].strip()
+        if not line:
+            return None
 
-    line = bytes(buf).split(b"\n", 1)[0].strip()
-    if not line:
+        return json.loads(line.decode("utf-8"))
+    except (socket.timeout, OSError):
         return None
 
-    try:
-        resp = json.loads(line.decode("utf-8"))
-    except Exception:
-        return None
 
-    dec = resp.get("decision")
-    return dec if isinstance(dec, str) else None
+def _get_pairing_code(s: socket.socket) -> str | None:
+    """
+    获取配对码。
+    """
+    payload = json.dumps({"action": "get_pairing_code"}) + "\n"
+    resp = _send_request(s, payload.encode("utf-8"))
+    if resp and "pairing_code" in resp:
+        return str(resp["pairing_code"])
+    return None
+
+
+def _send_permission_request(s: socket.socket, req: dict) -> str | None:
+    """
+    发送审批请求并等待决策。
+    """
+    payload = json.dumps(req, separators=(",", ":"), ensure_ascii=False) + "\n"
+    resp = _send_request(s, payload.encode("utf-8"))
+    if resp and "decision" in resp:
+        return str(resp["decision"])
+    return None
 
 
 # ── 主逻辑 ─────────────────────────────────────────────────────────────────────
@@ -147,17 +163,37 @@ def main() -> None:
         "hint": _make_hint(tool_input),
         "context": event,
     }
-    payload = (json.dumps(req, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 
-    decision = _ask_bridge(payload)
-
-    if decision == "once":
-        _emit_allow()
-    elif decision == "deny":
-        _emit_deny("已通过 ccbb 拒绝此操作")
-    else:
-        # "timeout" / "abandoned" / None / 其他未知值 → fail-open
+    s = _connect_to_bridge()
+    if not s:
         _fail_open()
+        return
+
+    try:
+        # 先获取配对码
+        pairing_code = _get_pairing_code(s)
+        if not pairing_code:
+            _fail_open()
+            return
+
+        # 输出配对码到 stderr（Claude Code 会显示这个）
+        print(f"设备配对码: {pairing_code}", file=sys.stderr)
+        sys.stderr.flush()
+
+        # 发送审批请求
+        decision = _send_permission_request(s, req)
+
+        if decision == "once":
+            _emit_allow()
+        elif decision == "deny":
+            _emit_deny("已通过 ccbb 拒绝此操作")
+        else:
+            _fail_open()
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

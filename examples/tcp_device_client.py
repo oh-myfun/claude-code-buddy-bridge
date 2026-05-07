@@ -18,6 +18,8 @@ class DeviceState:
     pending: Optional[dict] = None
     context: Optional[dict] = None
     entries: list[str] = field(default_factory=list)
+    paired: bool = False
+    pairing_code: Optional[str] = None
 
 
 async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
@@ -31,12 +33,25 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
             if not line:
                 break
 
-            cmd = line.strip().lower()
+            cmd = line.strip()
 
-            if cmd == 'q':
+            if cmd.lower() == 'q':
                 print("[设备] 退出…")
                 break
-            elif cmd == 'c' and state.context:
+            elif not state.paired:
+                # 未配对状态：输入配对码
+                if len(cmd) == 6 and cmd.isdigit():
+                    # 发送配对请求
+                    resp = {
+                        "cmd": "pair",
+                        "pairing_code": cmd
+                    }
+                    print(f"[设备] 发送配对请求: {resp}")
+                    writer.write((json.dumps(resp) + "\n").encode())
+                    await writer.drain()
+                else:
+                    print("[设备] 请输入6位配对码")
+            elif cmd.lower() == 'c' and state.context:
                 # 显示完整上下文
                 print(f"\n{'=' * 60}")
                 print(f"[设备] 完整上下文:")
@@ -44,7 +59,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 print(f"{'=' * 60}\n")
                 if state.pending:
                     print("请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
-            elif cmd == 'a' and state.pending:
+            elif cmd.lower() == 'a' and state.pending:
                 # 发送允许
                 resp = {
                     "cmd": "permission",
@@ -56,7 +71,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 await writer.drain()
                 state.pending = None
                 state.context = None
-            elif cmd == 'd' and state.pending:
+            elif cmd.lower() == 'd' and state.pending:
                 # 发送拒绝
                 resp = {
                     "cmd": "permission",
@@ -120,7 +135,26 @@ async def main():
                     print(f"[设备] 收到无效 JSON: {line}")
                     continue
 
-                if "time" in msg:
+                cmd = msg.get("cmd")
+                if cmd == "paired":
+                    # 配对成功
+                    state.paired = True
+                    state.pairing_code = msg.get("pairing_code")
+                    print(f"[设备] 配对成功! 配对码: {state.pairing_code}")
+                    print("[设备] 等待审批请求...")
+                elif cmd == "pairing_failed":
+                    # 配对失败
+                    print(f"[设备] 配对失败: {msg.get('reason', '未知原因')}")
+                    print("[设备] 请重新输入配对码")
+                elif cmd == "waiting_pairing":
+                    # 等待配对
+                    print(f"[设备] {msg.get('message', '等待配对')}")
+                elif cmd == "unpaired":
+                    # 配对解除
+                    state.paired = False
+                    state.pairing_code = None
+                    print("[设备] 配对已解除，请重新配对")
+                elif "time" in msg:
                     print(f"[设备] 收到时间同步: {msg['time']}")
                 elif "ack" in msg:
                     print(f"[设备] 收到确认: {msg}")

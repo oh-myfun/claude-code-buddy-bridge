@@ -36,8 +36,8 @@ flowchart TD
 - **零侵入**：通过 Claude Code 原生 Hook 接入，不需要修改任何项目文件
 - **Fail-open**：守护进程未运行时，CC 自动回退到自己的权限对话框
 - **TCP 网络通信**：使用标准 TCP/IP 协议，跨平台、跨设备兼容
-- **多设备支持**：手机、嵌入式设备、单片机等任何支持 TCP 的设备均可连接
-- **支持多设备同时连接**：多个设备可以同时连接并接收审批请求
+- **多终端多设备配对**：支持多个 Claude Code 终端与多个审批设备配对
+- **设备配对机制**：通过 6 位随机配对码建立终端与设备的一一对应关系
 - **完整上下文传递**：所有 Claude Code Hook 的原始信息都会传递给设备
 - **支持多语言**：不再有中文等非 ASCII 字符的限制
 - **并发串行**：多个并发 hook 请求排队，不会同时争抢设备
@@ -47,14 +47,15 @@ flowchart TD
 
 ## 跨平台说明
 
-本项目支持 Windows、macOS 和 Linux 系统，**内部通信机制会自动适配**：
+本项目支持 **Windows、macOS 和 Linux** 系统，所有平台统一使用 TCP 网络通信，无需根据平台区分：
 
-| 系统 | hook → bridge 通信 | bridge → 设备通信 |
-|------|-------------------|------------------|
-| **Unix** | Unix Socket（优先）/ TCP | TCP |
-| **Windows** | TCP | TCP |
+- **Hook → Bridge**：TCP（端口 9876，本地回环）
+- **Bridge → 设备**：TCP（端口 9876）
 
-Unix Socket 更高效安全（仅本地访问），Windows 使用 TCP（端口 9877）。**用户无需关心这些细节**，命令行工具完全相同。
+统一使用 TCP 的优势：
+- 跨平台兼容性好，代码逻辑一致
+- 简化部署和配置
+- 同一端口同时支持 Hook 和设备连接
 
 ## 支持的设备
 
@@ -64,6 +65,52 @@ Unix Socket 更高效安全（仅本地访问），Windows 使用 TCP（端口 9
 - 🔧 **嵌入式设备**：ESP32、Arduino、Raspberry Pi 等
 - 💻 **电脑/服务器**：通过脚本或程序连接
 - 🕹️ **单片机**：任何支持网络功能的 MCU
+
+## 配对机制
+
+系统支持多个 Claude Code 终端与多个审批设备配对，通过 6 位随机配对码建立一一对应关系：
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant Hook as Hook Script
+    participant Bridge as ccbb daemon
+    participant Device as 审批设备
+
+    CC->>Hook: 触发权限请求
+    Hook->>Bridge: {"action": "get_pairing_code"}
+    Bridge-->>Hook: {"pairing_code": "123456"}
+    Hook-->>CC: 显示配对码
+    Note over CC: 用户在 Claude Code 中看到配对码
+    
+    Device->>Bridge: 连接 TCP
+    Bridge-->>Device: {"cmd": "waiting_pairing"}
+    Device->>Bridge: {"cmd": "pair", "pairing_code": "123456"}
+    Bridge-->>Device: {"cmd": "paired"}
+    Note over Bridge: 配对成功，建立联系
+    
+    Hook->>Bridge: {"id": "...", "tool": "Bash", "hint": "..."}
+    Bridge-->>Device: {"waiting": 1, "prompt": {...}}
+    Device->>Bridge: {"cmd": "permission", "id": "...", "decision": "once"}
+    Bridge-->>Hook: {"decision": "once"}
+    Hook-->>CC: 允许操作
+```
+
+**配对流程说明**：
+
+1. **Claude Code 发起连接**：当触发需要审批的操作时，Hook 脚本连接到 Bridge 并获取配对码
+2. **显示配对码**：配对码显示在 Claude Code 界面上
+3. **设备输入配对码**：用户在审批设备上输入配对码并发送配对请求
+4. **建立配对关系**：Bridge 验证配对码，建立 Hook 与设备的配对关系
+5. **审批请求定向发送**：后续的审批请求只发送给配对的设备
+6. **决策响应定向返回**：设备的决策响应只返回给配对的 Claude Code 终端
+
+**配对特性**：
+
+- 一个 Hook（Claude Code 终端）在配对后只能与一个设备通信
+- 一个设备在配对后只能处理一个 Hook 的请求
+- 配对关系在任意一方断开连接后自动解除
+- 未配对的 Hook 会等待设备配对（最多 60 秒）
 
 ---
 
@@ -172,9 +219,38 @@ uv run ccbb install
 
 ## TCP 协议说明
 
-守护进程作为 TCP 服务端，设备作为客户端连接。双方通过 JSON 行协议通信。
+守护进程作为 TCP 服务端，Hook 和设备都作为客户端连接。双方通过 JSON 行协议通信（每条消息以换行符 `\n` 结尾）。
+
+### 连接识别
+
+Bridge 通过第一条消息自动识别连接类型：
+
+| 消息特征 | 连接类型 |
+|---------|---------|
+| 包含 `"tool"` 字段或 `"action": "get_pairing_code"` | Hook 连接（Claude Code） |
+| 包含 `"cmd": "pair"` 或 `"cmd": "permission"` | 设备连接 |
 
 ### 从服务端到设备
+
+**等待配对**（设备刚连接时）：
+```json
+{"cmd": "waiting_pairing", "message": "请输入配对码"}
+```
+
+**配对成功**：
+```json
+{"cmd": "paired", "pairing_code": "123456"}
+```
+
+**配对失败**：
+```json
+{"cmd": "pairing_failed", "reason": "配对码无效或已过期"}
+```
+
+**配对解除**（Hook 断开时）：
+```json
+{"cmd": "unpaired"}
+```
 
 **时间同步**：
 ```json
@@ -208,9 +284,22 @@ uv run ccbb install
 
 **context 字段**（可选）：包含 Claude Code Hook 的完整原始信息，设备可以根据需要展示或使用此信息。
 
+**确认响应**（收到审批决策后）：
+```json
+{"ack": "permission", "ok": true, "n": 0}
+```
+
 ### 从设备到服务端
 
-**审批决策**：
+**配对请求**（设备必须先配对才能发送审批决策）：
+```json
+{
+  "cmd": "pair",
+  "pairing_code": "123456"
+}
+```
+
+**审批决策**（必须已配对）：
 ```json
 {
   "cmd": "permission",
@@ -223,9 +312,31 @@ uv run ccbb install
 - `once`：批准
 - `deny`：拒绝
 
-**确认响应**（从服务端到设备）：
+### 从 Hook 到服务端
+
+**获取配对码**：
 ```json
-{"ack": "permission", "ok": true, "n": 0}
+{"action": "get_pairing_code"}
+```
+
+**响应**：
+```json
+{"pairing_code": "123456"}
+```
+
+**审批请求**：
+```json
+{
+  "id": "req_12345",
+  "tool": "Bash",
+  "hint": "ls -la",
+  "context": {...}
+}
+```
+
+**响应**：
+```json
+{"decision": "once"}  // 或 "deny"、"timeout"
 ```
 
 ---
@@ -235,11 +346,14 @@ uv run ccbb install
 ### 基本流程
 
 1. **连接到 TCP 服务端**：连接到电脑的 IP 和端口
-2. **接收快照消息**：解析 JSON 格式的状态更新
-3. **显示审批请求**：当 `waiting > 0` 时，显示 `prompt` 中的信息
-4. **发送决策**：用户操作后，发送包含 `cmd`、`id` 和 `decision` 的 JSON
+2. **接收等待配对消息**：服务端发送 `{"cmd": "waiting_pairing"}`
+3. **输入配对码**：用户在设备上输入 Claude Code 显示的 6 位配对码
+4. **发送配对请求**：发送 `{"cmd": "pair", "pairing_code": "123456"}`
+5. **等待配对成功**：服务端返回 `{"cmd": "paired"}`
+6. **接收审批请求**：当有待审批请求时，服务端发送快照消息
+7. **发送决策**：用户操作后，发送包含 `cmd`、`id` 和 `decision` 的 JSON
 
-### 最小实现示例
+### 最小实现示例（包含配对）
 
 ```python
 import socket
@@ -249,32 +363,69 @@ import json
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect(("192.168.1.100", 9876))
 
-# 接收消息
+paired = False
+rx_buf = bytearray()
+
 while True:
     data = s.recv(1024)
     if not data:
         break
-    msg = json.loads(data.decode())
+    rx_buf.extend(data)
     
-    # 检查是否有待审批请求
-    if msg.get("waiting", 0) > 0:
-        prompt = msg["prompt"]
-        print(f"审批请求: {prompt['tool']} - {prompt['hint']}")
+    # 处理所有完整的 JSON 消息
+    while b"\n" in rx_buf:
+        nl = rx_buf.find(b"\n")
+        line = bytes(rx_buf[:nl])
+        del rx_buf[:nl + 1]
         
-        # 模拟用户输入
-        decision = input("批准(a)或拒绝(d)? ").strip().lower()
-        if decision == "a":
-            s.sendall(json.dumps({
-                "cmd": "permission",
-                "id": prompt["id"],
-                "decision": "once"
-            }).encode() + b"\n")
-        elif decision == "d":
-            s.sendall(json.dumps({
-                "cmd": "permission",
-                "id": prompt["id"],
-                "decision": "deny"
-            }).encode() + b"\n")
+        try:
+            msg = json.loads(line.decode("utf-8"))
+        except:
+            continue
+        
+        cmd = msg.get("cmd")
+        
+        if cmd == "waiting_pairing":
+            # 未配对，等待用户输入配对码
+            pairing_code = input("请输入配对码: ").strip()
+            if len(pairing_code) == 6 and pairing_code.isdigit():
+                s.sendall(json.dumps({
+                    "cmd": "pair",
+                    "pairing_code": pairing_code
+                }).encode() + b"\n")
+        elif cmd == "paired":
+            # 配对成功
+            paired = True
+            print(f"配对成功! 配对码: {msg.get('pairing_code')}")
+            print("等待审批请求...")
+        elif cmd == "pairing_failed":
+            # 配对失败
+            print(f"配对失败: {msg.get('reason', '未知原因')}")
+        elif cmd == "unpaired":
+            # 配对解除
+            paired = False
+            print("配对已解除，请重新配对")
+        elif msg.get("waiting", 0) > 0 and paired:
+            # 收到审批请求
+            prompt = msg["prompt"]
+            print(f"\n审批请求:")
+            print(f"  工具: {prompt['tool']}")
+            print(f"  提示: {prompt['hint']}")
+            
+            # 模拟用户输入
+            decision = input("批准(a)或拒绝(d)? ").strip().lower()
+            if decision == "a":
+                s.sendall(json.dumps({
+                    "cmd": "permission",
+                    "id": prompt["id"],
+                    "decision": "once"
+                }).encode() + b"\n")
+            elif decision == "d":
+                s.sendall(json.dumps({
+                    "cmd": "permission",
+                    "id": prompt["id"],
+                    "decision": "deny"
+                }).encode() + b"\n")
 
 s.close()
 ```

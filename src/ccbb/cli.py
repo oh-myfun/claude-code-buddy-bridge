@@ -59,9 +59,9 @@ def cmd_install(args: argparse.Namespace) -> None:
     hook_py = Path(__file__).parent / "hook.py"
 
     if hook_script.exists():
-        command = str(hook_script)
+        command = str(hook_script).replace("\\", "/")
     else:
-        command = f"{sys.executable} {hook_py}"
+        command = f'"{sys.executable}" "{hook_py}"'.replace("\\", "/")
 
     settings_path = Path.home() / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,6 +83,7 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     session_start_hooks = hooks_block.setdefault("SessionStart", [])
     permission_hooks = hooks_block.setdefault("PermissionRequest", [])
+    session_end_hooks = hooks_block.setdefault("SessionEnd", [])
 
     def is_ccbb_entry(entry: dict) -> bool:
         return any(
@@ -93,9 +94,13 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     session_start_hooks[:] = [e for e in session_start_hooks if not is_ccbb_entry(e)]
     permission_hooks[:] = [e for e in permission_hooks if not is_ccbb_entry(e)]
+    session_end_hooks[:] = [e for e in session_end_hooks if not is_ccbb_entry(e)]
 
     session_start_entry = {"hooks": [hook_entry]}
     session_start_hooks.append(session_start_entry)
+
+    session_end_entry = {"hooks": [hook_entry]}
+    session_end_hooks.append(session_end_entry)
 
     matchers = args.tools if args.tools else [""]
     for matcher in matchers:
@@ -111,6 +116,7 @@ def cmd_install(args: argparse.Namespace) -> None:
     print(f"✓ ccbb hook 已写入 {settings_path}")
     print(f"  命令: {command}")
     print("  SessionStart hook: 已添加（用于显示配对码）")
+    print("  SessionEnd hook: 已添加（用于清理配对）")
     print(f"  PermissionRequest hook: 覆盖范围: {'所有工具' if not args.tools else ', '.join(args.tools)}")
     print()
     print("下一步：")
@@ -141,7 +147,7 @@ def cmd_uninstall(_args: argparse.Namespace) -> None:
         )
 
     removed = 0
-    for hook_type in ["SessionStart", "PermissionRequest"]:
+    for hook_type in ["SessionStart", "PermissionRequest", "SessionEnd"]:
         hooks_list = hooks_block.get(hook_type, [])
         before = len(hooks_list)
         hooks_list[:] = [e for e in hooks_list if not is_ccbb_entry(e)]

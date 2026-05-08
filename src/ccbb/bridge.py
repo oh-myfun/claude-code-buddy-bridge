@@ -3,73 +3,64 @@ ccbb.bridge — 守护进程核心
 
 架构说明
 --------
-支持多个 Claude Code 终端与多个审批设备配对：
+支持多个 Claude Code 会话与多个审批设备配对：
 
-  Claude Code CLI ──session_id── 设备
-       │                              │
-       ▼                              ▼
-  TCP Socket (9876)              TCP Socket (9876)
-       │                              │
-       └──────────── Bridge ────────────┘
+  Claude Code 会话 A ──pairing_code_A── 设备 A
+  Claude Code 会话 B ──pairing_code_B── 设备 B
 
-配对机制（基于 session_id）：
-1. SessionStart hook 触发时，Bridge 注册 session 并生成配对码
-2. 配对码 = session_id 前6位（或基于 session_id 生成）
-3. 用户在设备上输入配对码并连接
-4. Bridge 将设备与 session 配对
-5. PermissionRequest hook 使用 session_id 查找配对的设备
-6. 设备响应只发送给对应 session 的 Hook
+配对机制：
+1. SessionStart hook 触发时，Bridge 注册会话并生成 6 位配对码
+2. Hook 将配对码显示在 Claude Code 终端
+3. 用户在设备上输入配对码完成配对
+4. 审批请求只发送给配对的设备，决策只返回给配对的 Hook
+5. SessionEnd hook 触发时清理配对并通知设备
 
 关键设计
 --------
-1. session_id 作为唯一标识，贯穿整个 session 生命周期
-2. 配对码基于 session_id 生成，易于记忆
-3. Fail-open：bridge 未运行时，CC 走自己的权限对话框
-4. 支持多终端多设备配对
-
-额外改进
---------
-- 电脑作为 TCP 服务端，设备主动连接
-- 支持完整 Unicode，不再限制中文字符
-- 跨平台支持：Windows、macOS、Linux 统一使用 TCP
+1. PERMISSION_TIMEOUT=110s（必须小于 CC hook 超时 120s）
+2. Fail-open：bridge 未运行时，CC 走自己的权限对话框
+3. SessionEnd 火速清理（不 await 通知）
+4. 跨平台：Windows、macOS、Linux 统一使用 TCP
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
+import random
 import signal
+import socket
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Set, Dict
 
+# ── 常量 ───────────────────────────────────────────────────────────────────
 TCP_HOST_DEFAULT = "0.0.0.0"
 TCP_PORT_DEFAULT = 9876
-PERMISSION_TIMEOUT = 110.0
+PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
 ENTRIES_MAX = 5
 
 logger = logging.getLogger("ccbb.bridge")
 
 
-def generate_pairing_code_from_session(session_id: str) -> str:
-    """基于 session_id 生成6位配对码"""
-    hash_val = hashlib.md5(session_id.encode()).hexdigest()
-    num = int(hash_val[:8], 16)
-    return str(num % 900000 + 100000)
+# ── 工具函数 ────────────────────────────────────────────────────────────────
+
+
+def generate_pairing_code() -> str:
+    """生成随机6位配对码"""
+    return str(random.randint(100000, 999999))
 
 
 def truncate(text: str, max_len: int = 60) -> str:
+    """截断文本，保护设备显示。"""
     return text[:max_len]
 
 
-def _tz_offset_seconds() -> int:
-    return -time.altzone if time.daylight and time.localtime().tm_isdst else -time.timezone
-
-
+# ── 数据结构 ────────────────────────────────────────────────────────────────
 @dataclass
 class PendingRequest:
     id: str
@@ -77,13 +68,15 @@ class PendingRequest:
     hint: str
     decision_future: asyncio.Future
     context: Optional[dict] = None
+    suggestions: Optional[list] = None
 
 
 @dataclass
-class SessionInfo:
-    """存储 session 信息"""
+class Session:
+    """一个 Claude Code 会话"""
     session_id: str
     pairing_code: str
+    paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_request: Optional[PendingRequest] = None
     entries: list[str] = field(default_factory=list)
 
@@ -95,7 +88,7 @@ class DeviceConnection:
     writer: asyncio.StreamWriter
     addr: tuple
     uid: str
-    pairing_code: Optional[str] = None
+    session_id: Optional[str] = None
 
     def __hash__(self) -> int:
         return hash(self.uid)
@@ -106,14 +99,81 @@ class DeviceConnection:
         return False
 
 
+# ── Bridge 主类 ─────────────────────────────────────────────────────────────
 class Bridge:
-    def __init__(self) -> None:
-        self._sessions: Dict[str, SessionInfo] = {}
-        self._pairings: Dict[str, SessionInfo] = {}
+    def __init__(self, host: str = "0.0.0.0", port: int = TCP_PORT_DEFAULT) -> None:
+        self._sessions: Dict[str, Session] = {}  # session_id → Session
+        self._pairing_index: Dict[str, str] = {}  # pairing_code → session_id
         self._unpaired_devices: Set[DeviceConnection] = set()
-        self._pending_decisions: Dict[str, asyncio.Future] = {}
+        self._host = host
+        self._port = port
+        self._local_ips: list[str] = []
+
+    # ── 设备消息发送 ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _display_width(s: str) -> int:
+        """计算字符串在终端中的实际显示宽度（CJK 字符占 2 列）"""
+        w = 0
+        for ch in s:
+            eaw = unicodedata.east_asian_width(ch)
+            w += 2 if eaw in ("W", "F") else 1
+        return w
+
+    def _pad_center(self, s: str, width: int) -> str:
+        """按显示宽度居中填充"""
+        sw = self._display_width(s)
+        pad = width - sw
+        if pad <= 0:
+            return s
+        left = pad // 2
+        return " " * left + s + " " * (pad - left)
+
+    def _print_pairing_banner(self, pairing_code: str, session_id: str) -> None:
+        """在 daemon 终端显示醒目的配对码 + QR 码（每个 IP 一个 QR）"""
+        hosts = self._local_ips if self._local_ips else ["127.0.0.1"]
+        qr_entries: list[tuple[str, str]] = []  # (url, qr_str)
+        for host in hosts:
+            url = f"http://{host}:{self._port}/pair?code={pairing_code}"
+            try:
+                from ccbb.qrcode import qr_to_terminal
+                qr_str = qr_to_terminal(url)
+                qr_entries.append((url, qr_str))
+            except Exception:
+                qr_entries.append((url, ""))
+
+        spaced_code = "  ".join(pairing_code)
+        sid_short = session_id[:8] if len(session_id) > 8 else session_id
+
+        # 自适应边框宽度
+        w = 42
+        for url, _ in qr_entries:
+            w = max(w, self._display_width(url) + 4)
+
+        lines = [
+            "",
+            "╔" + "═" * w + "╗",
+            "║" + self._pad_center(f"Session: {sid_short}", w) + "║",
+            "║" + "═" * w + "║",
+            "║" + self._pad_center(spaced_code, w) + "║",
+            "║" + "═" * w + "║",
+        ]
+        for i, (url, qr_str) in enumerate(qr_entries):
+            if i > 0:
+                lines.append("║" + " " * w + "║")
+            lines.append("║" + self._pad_center(url, w) + "║")
+            if qr_str:
+                for line in qr_str.splitlines():
+                    lines.append("║" + self._pad_center(line, w) + "║")
+        lines += [
+            "║" + self._pad_center("在审批设备上输入配对码或扫描二维码", w) + "║",
+            "╚" + "═" * w + "╝",
+            "",
+        ]
+        print("\n".join(lines))
 
     async def _send_to_device(self, device: DeviceConnection, obj: dict) -> None:
+        """发送消息到设备"""
         try:
             payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
             device.writer.write(payload)
@@ -122,185 +182,114 @@ class Bridge:
             logger.warning(f"发送消息到设备 {device.addr} 失败: {e}")
             self._remove_device(device)
 
-    def _remove_device(self, device: DeviceConnection) -> None:
-        if device in self._unpaired_devices:
-            self._unpaired_devices.remove(device)
+    # ── 会话管理 ────────────────────────────────────────────────────────────
 
-        for pairing_code, session in list(self._pairings.items()):
-            if hasattr(session, 'device') and session.device == device:
-                session.device = None
-                logger.info(f"设备 {device.addr} 断开，配对 {pairing_code} 解除")
+    async def _register_session(self, session_id: str, writer: asyncio.StreamWriter) -> None:
+        """注册 CC 会话，返回配对码"""
+        if session_id in self._sessions:
+            # 会话已存在（resume），返回现有配对码
+            session = self._sessions[session_id]
+            writer.write(json.dumps({"pairing_code": session.pairing_code}).encode() + b"\n")
+            await writer.drain()
+            logger.info(f"Session 恢复: {session_id[:8]}... 配对码={session.pairing_code}")
+            return
+
+        code = generate_pairing_code()
+        while code in self._pairing_index:
+            code = generate_pairing_code()
+
+        session = Session(session_id=session_id, pairing_code=code)
+        self._sessions[session_id] = session
+        self._pairing_index[code] = session_id
+        logger.info(f"Session 注册: {session_id[:8]}... 配对码={code}")
+
+        self._print_pairing_banner(code, session_id)
+
+        writer.write(json.dumps({"pairing_code": code}).encode() + b"\n")
+        await writer.drain()
+
+    def _unregister_session(self, session_id: str) -> None:
+        """清理会话，通知所有配对设备"""
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+
+        self._pairing_index.pop(session.pairing_code, None)
+
+        # 通知所有配对设备
+        for device in list(session.paired_devices):
+            device.session_id = None
+            self._unpaired_devices.add(device)
+            asyncio.ensure_future(self._send_to_device(device, {
+                "cmd": "session_end", "session_id": session_id,
+            }))
+        session.paired_devices.clear()
+
+        # 取消挂起的请求
+        if session.pending_request and not session.pending_request.decision_future.done():
+            session.pending_request.decision_future.set_result("timeout")
+
+        logger.info(f"Session 结束: {session_id[:8]}...")
+
+    # ── 设备管理 ────────────────────────────────────────────────────────────
+
+    def _remove_device(self, device: DeviceConnection) -> None:
+        """移除断开的设备"""
+        self._unpaired_devices.discard(device)
+
+        if device.session_id:
+            session = self._sessions.get(device.session_id)
+            if session:
+                session.paired_devices.discard(device)
+            device.session_id = None
 
         try:
             device.writer.close()
         except Exception:
             pass
 
-    async def _handle_session_start(self, msg: dict, writer: asyncio.StreamWriter) -> None:
-        """处理 SessionStart 事件"""
-        session_id = msg.get("session_id", "")
-        if not session_id:
-            logger.warning("SessionStart 缺少 session_id")
-            return
-
-        pairing_code = generate_pairing_code_from_session(session_id)
-        
-        session = SessionInfo(session_id=session_id, pairing_code=pairing_code)
-        self._sessions[session_id] = session
-
-        logger.info(f"Session 注册: {session_id[:8]}... 配对码: {pairing_code}")
-
-        writer.write(json.dumps({
-            "pairing_code": pairing_code
-        }).encode() + b"\n")
-        await writer.drain()
-
-    async def _handle_permission_request(self, msg: dict, writer: asyncio.StreamWriter) -> None:
-        """处理 PermissionRequest 事件"""
-        session_id = msg.get("session_id", "")
-        if not session_id:
-            logger.warning("PermissionRequest 缺少 session_id")
-            writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
-            await writer.drain()
-            return
-
-        if session_id not in self._sessions:
-            logger.warning(f"未知 session: {session_id[:8]}...")
-            writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
-            await writer.drain()
-            return
-
-        session = self._sessions[session_id]
-        pairing_code = session.pairing_code
-
-        rid = str(msg.get("id") or f"req_{int(time.time() * 1000)}")
-        tool = str(msg.get("tool") or "?")
-        hint = str(msg.get("hint") or "")
-        context = msg.get("context") if isinstance(msg.get("context"), dict) else None
-
-        logger.info(f"收到请求 session={session_id[:8]}... id={rid} tool={tool}")
-
-        if pairing_code not in self._pairings:
-            logger.warning(f"Session {session_id[:8]}... 未配对")
-            writer.write(json.dumps({
-                "decision": "timeout",
-                "error": "设备未配对"
-            }).encode() + b"\n")
-            await writer.drain()
-            return
-
-        session = self._pairings[pairing_code]
-        device = getattr(session, 'device', None)
-        if not device:
-            logger.warning(f"Session {session_id[:8]}... 配对设备已断开")
-            writer.write(json.dumps({
-                "decision": "timeout",
-                "error": "设备已断开"
-            }).encode() + b"\n")
-            await writer.drain()
-            return
-
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        session.pending_request = PendingRequest(
-            id=rid, tool=tool, hint=hint, decision_future=fut, context=context
-        )
-        session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool}: {hint}', 50)}")
-        session.entries = session.entries[:ENTRIES_MAX]
-
-        self._pending_decisions[rid] = fut
-
-        snapshot = {
-            "total": 1,
-            "running": 0,
-            "waiting": 1,
-            "msg": truncate(f"approve: {tool}"),
-            "entries": list(reversed(session.entries[:ENTRIES_MAX])),
-            "tokens": 0,
-            "tokens_today": 0,
-            "prompt": {
-                "id": rid,
-                "tool": truncate(tool),
-                "hint": truncate(hint),
-            },
-        }
-        if context:
-            snapshot["context"] = context
-
-        try:
-            await self._send_to_device(device, snapshot)
-        except Exception as e:
-            logger.warning(f"发送快照失败: {e}")
-            writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
-            await writer.drain()
-            return
-
-        try:
-            decision = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
-        except asyncio.TimeoutError:
-            decision = "timeout"
-            logger.warning(f"id={rid} 审批超时")
-
-        session.pending_request = None
-        if rid in self._pending_decisions:
-            del self._pending_decisions[rid]
-
-        writer.write(json.dumps({"decision": decision}).encode() + b"\n")
-        await writer.drain()
-
-        logger.info(f"id={rid} → decision={decision}")
-
     async def _handle_pairing_request(self, device: DeviceConnection, pairing_code: str) -> bool:
         """处理设备的配对请求"""
-        for session_id, session in self._sessions.items():
-            if session.pairing_code == pairing_code:
-                self._pairings[pairing_code] = session
-                session.device = device
-                device.pairing_code = pairing_code
-                self._unpaired_devices.discard(device)
-                
-                logger.info(f"配对成功: {pairing_code} <-> {session_id[:8]}...")
+        session_id = self._pairing_index.get(pairing_code)
+        if session_id is None:
+            await self._send_to_device(device, {
+                "cmd": "pairing_failed", "reason": "配对码无效或已过期",
+            })
+            logger.warning(f"设备 {device.addr} 配对失败，无效配对码: {pairing_code}")
+            return False
 
-                await self._send_to_device(device, {
-                    "cmd": "paired",
-                    "pairing_code": pairing_code,
-                    "session_id": session_id[:8] + "..."
-                })
+        session = self._sessions.get(session_id)
+        if session is None:
+            self._pairing_index.pop(pairing_code, None)
+            await self._send_to_device(device, {
+                "cmd": "pairing_failed", "reason": "配对码已过期",
+            })
+            return False
 
-                if session.pending_request:
-                    await self._send_to_device(device, {
-                        "time": [int(time.time()), _tz_offset_seconds()]
-                    })
-
-                return True
+        # 配对（多设备，不踢掉已有设备）
+        session.paired_devices.add(device)
+        device.session_id = session_id
+        self._unpaired_devices.discard(device)
 
         await self._send_to_device(device, {
-            "cmd": "pairing_failed",
-            "reason": "配对码无效或已过期"
+            "cmd": "paired",
+            "pairing_code": pairing_code,
+            "session_id": session_id,
         })
-        logger.warning(f"设备 {device.addr} 配对失败，无效配对码: {pairing_code}")
-        return False
 
-    async def _handle_permission_decision(self, device: DeviceConnection, msg: dict) -> None:
-        """处理设备的审批决策"""
-        mid = msg.get("id")
-        decision = msg.get("decision")
+        # 如果有挂起的请求，发送快照给新设备
+        if session.pending_request:
+            await self._send_device_snapshot(device, session)
 
-        if mid in self._pending_decisions:
-            fut = self._pending_decisions[mid]
-            if not fut.done():
-                fut.set_result(decision)
-                logger.info(f"收到决策 id={mid} decision={decision}")
+        logger.info(f"设备 {device.addr} 配对到 session {session_id[:8]}... "
+                     f"(共 {len(session.paired_devices)} 个设备)")
+        return True
 
-            try:
-                await self._send_to_device(device, {"ack": "permission", "ok": True, "n": 0})
-            except Exception as e:
-                logger.warning("permission ack 发送失败: %s", e)
-        else:
-            logger.warning(f"收到孤立 permission id={mid!r}")
+    # ── 设备连接处理 ────────────────────────────────────────────────────────
 
-    async def _handle_device(self, first_msg: dict, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """处理设备连接"""
+    async def _handle_device(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                             first_msg: dict) -> None:
+        """处理设备连接（持久连接）"""
         addr = writer.get_extra_info("peername")
         logger.info(f"新设备连接: {addr}")
 
@@ -310,35 +299,16 @@ class Bridge:
         try:
             await self._send_to_device(device, {
                 "cmd": "waiting_pairing",
-                "message": "请输入配对码"
+                "message": "请输入配对码",
             })
-        except Exception as e:
-            logger.warning(f"发送初始消息失败: {e}")
+        except Exception:
             self._remove_device(device)
             return
 
+        await self._process_device_message(device, first_msg)
+
         try:
             rx_buf = bytearray()
-            
-            async def process_msg(msg: dict):
-                cmd = msg.get("cmd")
-                if cmd == "pair":
-                    pairing_code = msg.get("pairing_code")
-                    if pairing_code:
-                        await self._handle_pairing_request(device, pairing_code)
-                elif cmd == "permission":
-                    if device.pairing_code:
-                        await self._handle_permission_decision(device, msg)
-                    else:
-                        await self._send_to_device(device, {
-                            "cmd": "error",
-                            "reason": "请先配对"
-                        })
-                else:
-                    logger.warning(f"未知设备命令: {cmd}")
-
-            await process_msg(first_msg)
-
             while True:
                 data = await reader.read(4096)
                 if not data:
@@ -359,7 +329,7 @@ class Bridge:
                         logger.warning(f"设备 {addr} 消息解析失败: {line!r} — {e}")
                         continue
                     logger.debug(f"设备 {addr} → 主机: {json.dumps(msg, ensure_ascii=False)}")
-                    await process_msg(msg)
+                    await self._process_device_message(device, msg)
 
         except Exception as e:
             logger.error(f"设备连接处理异常: {e}")
@@ -367,19 +337,105 @@ class Bridge:
             self._remove_device(device)
             logger.info(f"设备断开: {addr}")
 
-    async def _handle_hook(self, msg: dict, writer: asyncio.StreamWriter):
-        """处理 Hook 连接（单次请求）"""
-        try:
-            logger.debug(f"Hook 消息: {json.dumps(msg, ensure_ascii=False)[:200]}")
-
-            action = msg.get("action", "")
-            
-            if action == "session_start":
-                await self._handle_session_start(msg, writer)
-            elif "session_id" in msg and "tool" in msg:
-                await self._handle_permission_request(msg, writer)
+    async def _process_device_message(self, device: DeviceConnection, msg: dict) -> None:
+        """处理单条设备消息"""
+        cmd = msg.get("cmd")
+        if cmd == "pair":
+            pairing_code = msg.get("pairing_code")
+            if pairing_code:
+                await self._handle_pairing_request(device, pairing_code)
+        elif cmd == "permission":
+            if device.session_id:
+                await self._handle_permission_decision(device, msg)
             else:
-                logger.warning(f"未知的 Hook 消息格式: {msg}")
+                await self._send_to_device(device, {
+                    "cmd": "error", "reason": "请先配对",
+                })
+        elif cmd == "hello":
+            pass
+
+    async def _handle_permission_decision(self, device: DeviceConnection, msg: dict) -> None:
+        """处理审批决策"""
+        mid = msg.get("id")
+        decision = msg.get("decision")
+        updated_permissions = msg.get("updated_permissions")
+        if not mid or not decision:
+            logger.warning(f"无效的审批决策: {msg}")
+            return
+
+        session = self._sessions.get(device.session_id or "")
+        if session and session.pending_request and session.pending_request.id == mid:
+            # 将 updated_permissions 附加到 future 结果
+            if updated_permissions:
+                session.pending_request.decision_future.set_result({
+                    "decision": decision,
+                    "updated_permissions": updated_permissions,
+                })
+            else:
+                session.pending_request.decision_future.set_result(decision)
+            session.pending_request = None
+            logger.info(f"收到决策 id={mid} decision={decision}")
+        else:
+            logger.warning(f"收到孤立 permission id={mid!r}")
+            return
+
+        try:
+            await self._send_to_device(device, {
+                "ack": "permission", "ok": True, "n": 0,
+            })
+        except Exception as e:
+            logger.warning("permission ack 发送失败: %s", e)
+
+    # ── 快照 ────────────────────────────────────────────────────────────────
+
+    async def _send_device_snapshot(self, device: DeviceConnection, session: Session) -> None:
+        """发送快照给设备"""
+        if session.pending_request:
+            snapshot = {
+                "total": 1, "running": 0, "waiting": 1,
+                "msg": truncate(f"approve: {session.pending_request.tool}"),
+                "entries": list(reversed(session.entries[:ENTRIES_MAX])),
+                "tokens": 0, "tokens_today": 0,
+                "prompt": {
+                    "id": session.pending_request.id,
+                    "tool": truncate(session.pending_request.tool),
+                    "hint": truncate(session.pending_request.hint),
+                },
+            }
+            if session.pending_request.context:
+                snapshot["context"] = session.pending_request.context
+            if session.pending_request.suggestions:
+                snapshot["suggestions"] = session.pending_request.suggestions
+        else:
+            snapshot = {
+                "total": 0, "running": 0, "waiting": 0,
+                "msg": "", "entries": list(reversed(session.entries[:ENTRIES_MAX])),
+                "tokens": 0, "tokens_today": 0,
+            }
+
+        await self._send_to_device(device, snapshot)
+
+    # ── Hook 连接处理 ───────────────────────────────────────────────────────
+
+    async def _handle_hook(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                           first_msg: dict) -> None:
+        """处理 Hook 连接"""
+        try:
+            action = first_msg.get("action")
+
+            if action == "session_start":
+                session_id = first_msg.get("session_id", "")
+                if session_id:
+                    await self._register_session(session_id, writer)
+
+            elif action == "session_end":
+                session_id = first_msg.get("session_id", "")
+                if session_id:
+                    self._unregister_session(session_id)
+
+            else:
+                # PermissionRequest
+                await self._process_permission_request(first_msg, writer)
 
         except Exception as e:
             logger.error(f"Hook 连接处理异常: {e}")
@@ -389,24 +445,112 @@ class Bridge:
             except Exception:
                 pass
 
+    async def _process_permission_request(self, msg: dict, writer: asyncio.StreamWriter) -> None:
+        """处理审批请求"""
+        session_id = msg.get("session_id", "")
+        if not session_id:
+            logger.warning("PermissionRequest 缺少 session_id")
+            return
+
+        session = self._sessions.get(session_id)
+        if session is None:
+            logger.warning(f"未知 session: {session_id[:8]}...")
+            return
+
+        rid = str(msg.get("id") or f"req_{int(time.time() * 1000)}")
+        tool = str(msg.get("tool") or "?")
+        hint = str(msg.get("hint") or "")
+        context = msg.get("context") if isinstance(msg.get("context"), dict) else None
+        suggestions = None
+        if context and isinstance(context.get("permission_suggestions"), list):
+            suggestions = context["permission_suggestions"]
+
+        logger.info(f"收到请求 session={session_id[:8]}... id={rid} tool={tool}")
+
+        # 等待设备配对（最多 60 秒）
+        wait_start = time.time()
+        while not session.paired_devices:
+            if time.time() - wait_start > 60.0:
+                logger.warning(f"等待设备配对超时 session={session_id[:8]}...")
+                writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
+                await writer.drain()
+                return
+            # 会话可能已被销毁
+            if session_id not in self._sessions:
+                return
+            await asyncio.sleep(0.5)
+
+        # 创建待处理请求
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        session.pending_request = PendingRequest(
+            id=rid, tool=tool, hint=hint, decision_future=fut,
+            context=context, suggestions=suggestions,
+        )
+        session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool}: {hint}', 50)}")
+        session.entries = session.entries[:ENTRIES_MAX]
+
+        # 发送快照到所有配对设备
+        for dev in list(session.paired_devices):
+            try:
+                await self._send_device_snapshot(dev, session)
+            except Exception as e:
+                logger.warning(f"发送快照到 {dev.addr} 失败: {e}")
+
+        # 等待决策或超时
+        try:
+            result = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
+        except asyncio.TimeoutError:
+            result = "timeout"
+            session.pending_request = None
+            logger.warning(f"id={rid} 审批超时")
+
+        # 通知所有配对设备审批结束
+        decision_str = result if isinstance(result, str) else result.get("decision", "timeout")
+        for dev in list(session.paired_devices):
+            try:
+                await self._send_to_device(dev, {
+                    "cmd": "permission_done",
+                    "id": rid,
+                    "decision": decision_str,
+                })
+            except Exception:
+                pass
+
+        # 构建响应发送给 Hook
+        if isinstance(result, dict):
+            resp = result
+        else:
+            resp = {"decision": result}
+        writer.write(json.dumps(resp).encode() + b"\n")
+        await writer.drain()
+        logger.info(f"id={rid} → decision={resp.get('decision')}")
+
+    # ── 连接识别与分发 ──────────────────────────────────────────────────────
+
     def _is_hook_request(self, msg: dict) -> bool:
-        return "action" in msg or "session_id" in msg
+        return (
+            "tool" in msg
+            or msg.get("action") in ("session_start", "session_end", "get_pairing_code")
+            or "session_id" in msg
+        )
 
     def _is_device_message(self, msg: dict) -> bool:
-        return "cmd" in msg and msg["cmd"] in ["pair", "permission"]
+        return "cmd" in msg
 
     async def handle_client(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """处理客户端连接：通过首条消息识别类型并分发"""
         addr = writer.get_extra_info("peername")
         logger.info(f"新连接: {addr}")
 
         try:
-            first_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            first_line = await asyncio.wait_for(reader.readline(), timeout=60.0)
         except asyncio.TimeoutError:
-            logger.warning(f"[{addr}] 5 秒内未收到消息")
+            logger.warning(f"[{addr}] 60 秒内未收到消息")
             writer.close()
             return
 
@@ -423,13 +567,16 @@ class Bridge:
 
         if self._is_hook_request(msg):
             logger.info(f"[{addr}] 识别为 Hook 连接")
-            await self._handle_hook(msg, writer)
+            await self._handle_hook(reader, writer, first_msg=msg)
         elif self._is_device_message(msg):
             logger.info(f"[{addr}] 识别为设备连接")
-            await self._handle_device(msg, reader, writer)
+            await self._handle_device(reader, writer, first_msg=msg)
         else:
             logger.warning(f"[{addr}] 无法识别的消息格式: {msg}")
             writer.close()
+
+
+# ── 主入口 ─────────────────────────────────────────────────────────────────
 
 
 async def run() -> None:
@@ -450,13 +597,42 @@ async def run() -> None:
         except NotImplementedError:
             pass
 
-    bridge = Bridge()
+    bridge = Bridge(host=host, port=port)
 
     server = await asyncio.start_server(
-        bridge.handle_client, host, port
+        bridge.handle_client, host, port,
     )
     logger.info(f"TCP 服务端已启动，监听 {host}:{port}")
-    logger.info("  - 支持多终端多设备配对（基于 session_id）")
+    logger.info("  支持多会话多设备配对")
+
+    # 探测本机所有 IP 供二维码使用
+    local_ips: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        seen: set[str] = set()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in seen:
+                seen.add(ip)
+                local_ips.append(ip)
+    except Exception:
+        pass
+    # 补充默认路由 IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect(("8.8.8.8", 80))
+        default_ip = s.getsockname()[0]
+        s.close()
+        if default_ip not in local_ips:
+            local_ips.insert(0, default_ip)
+    except Exception:
+        pass
+    bridge._local_ips = local_ips
+    if local_ips:
+        logger.info(f"  本机 IP: {', '.join(local_ips)}")
+    else:
+        logger.info("  本机 IP: 127.0.0.1 (仅本地)")
 
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
 

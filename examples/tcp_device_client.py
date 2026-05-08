@@ -8,6 +8,7 @@ import asyncio
 import json
 import sys
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,6 +21,25 @@ class DeviceState:
     entries: list[str] = field(default_factory=list)
     paired: bool = False
     pairing_code: Optional[str] = None
+    session_id: Optional[str] = None
+    suggestions: Optional[list] = None
+
+
+# 从 tool_input 中提取关键信息的字段（按优先级）
+_HINT_KEYS = ("command", "file_path", "url", "path", "pattern", "query", "prompt", "input", "description")
+
+
+def _extract_tool_info(context: dict) -> str:
+    """从 context 中提取 tool_input 的关键信息"""
+    tool_input = context.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return str(tool_input) if tool_input else ""
+    parts = []
+    for key in _HINT_KEYS:
+        val = tool_input.get(key)
+        if isinstance(val, str) and val:
+            parts.append(f"  {key}: {val[:200]}")
+    return "\n".join(parts) if parts else json.dumps(tool_input, indent=2, ensure_ascii=False)[:200]
 
 
 async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
@@ -54,11 +74,15 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
             elif cmd.lower() == 'c' and state.context:
                 # 显示完整上下文
                 print(f"\n{'=' * 60}")
-                print(f"[设备] 完整上下文:")
+                print("[设备] 完整上下文:")
                 print(f"{json.dumps(state.context, indent=2, ensure_ascii=False)}")
                 print(f"{'=' * 60}\n")
                 if state.pending:
-                    print("请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
+                    opts = "[A]允许  "
+                    if state.suggestions:
+                        opts += "[R]记住规则  "
+                    opts += "[D]拒绝  [C]详情  [Q]退出"
+                    print(f"请选择: {opts}")
             elif cmd.lower() == 'a' and state.pending:
                 # 发送允许
                 resp = {
@@ -71,6 +95,41 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 await writer.drain()
                 state.pending = None
                 state.context = None
+                state.suggestions = None
+            elif cmd.lower() == 'r' and state.pending and state.suggestions:
+                # 记住规则 — 显示可用规则让用户选择
+                print(f"\n{'=' * 60}")
+                print("[设备] 可记住的审批规则:")
+                for i, sug in enumerate(state.suggestions):
+                    rules = sug.get("addRules", [])
+                    for j, rule in enumerate(rules):
+                        behavior = rule.get("behavior", "?")
+                        tool = rule.get("tool", "*")
+                        print(f"  [{i}.{j}] {behavior} → {tool}")
+                print(f"{'=' * 60}")
+                print("输入规则编号（如 0.0）或 [C] 取消")
+            elif cmd.lower().startswith('r') and state.pending and state.suggestions:
+                pass  # handled above
+            elif re.match(r'\d+\.\d+', cmd) and state.pending and state.suggestions:
+                # 选择记住规则
+                try:
+                    si, ri = cmd.split('.')
+                    sug = state.suggestions[int(si)]
+                    rule = sug.get("addRules", [])[int(ri)]
+                    resp = {
+                        "cmd": "permission",
+                        "id": state.pending.get("id"),
+                        "decision": "once",
+                        "updated_permissions": [sug],
+                    }
+                    print(f"[设备] 发送允许并记住规则: {resp}")
+                    writer.write((json.dumps(resp) + "\n").encode())
+                    await writer.drain()
+                    state.pending = None
+                    state.context = None
+                    state.suggestions = None
+                except (ValueError, IndexError):
+                    print("[设备] 无效的规则编号")
             elif cmd.lower() == 'd' and state.pending:
                 # 发送拒绝
                 resp = {
@@ -83,8 +142,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 await writer.drain()
                 state.pending = None
                 state.context = None
+                state.suggestions = None
             elif state.pending:
-                print("请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
+                print("请选择: [A]允许  [R]记住规则  [D]拒绝  [C]详情  [Q]退出")
             else:
                 print("当前无待审批请求，请输入命令")
 
@@ -106,7 +166,12 @@ async def main():
         print("[设备] 请确保 ccbb daemon 正在运行")
         return
 
-    print(f"[设备] 已连接到服务端")
+    print("[设备] 已连接到服务端")
+
+    # 发送 hello 消息用于连接识别
+    writer.write((json.dumps({"cmd": "hello"}) + "\n").encode())
+    await writer.drain()
+
     state = DeviceState()
 
     # 启动用户输入任务
@@ -131,7 +196,7 @@ async def main():
                     continue
                 try:
                     msg = json.loads(line.decode("utf-8"))
-                except Exception as e:
+                except Exception:
                     print(f"[设备] 收到无效 JSON: {line}")
                     continue
 
@@ -140,7 +205,9 @@ async def main():
                     # 配对成功
                     state.paired = True
                     state.pairing_code = msg.get("pairing_code")
-                    print(f"[设备] 配对成功! 配对码: {state.pairing_code}")
+                    state.session_id = msg.get("session_id")
+                    sid = state.session_id[:8] if state.session_id else "?"
+                    print(f"[设备] 配对成功! session: {sid}...")
                     print("[设备] 等待审批请求...")
                 elif cmd == "pairing_failed":
                     # 配对失败
@@ -153,7 +220,24 @@ async def main():
                     # 配对解除
                     state.paired = False
                     state.pairing_code = None
+                    state.session_id = None
                     print("[设备] 配对已解除，请重新配对")
+                elif cmd == "session_end":
+                    # 会话结束
+                    state.paired = False
+                    state.pairing_code = None
+                    sid = msg.get("session_id", "?")
+                    print(f"[设备] 会话已结束 (session: {sid[:8]}...)")
+                    print("[设备] 请输入新的配对码")
+                elif cmd == "permission_done":
+                    # 审批完成通知
+                    done_id = msg.get("id", "?")
+                    done_decision = msg.get("decision", "?")
+                    state.pending = None
+                    state.context = None
+                    state.suggestions = None
+                    print(f"\n[设备] 审批已完成 (id={done_id}, decision={done_decision})")
+                    print("[设备] 等待下一个审批请求...")
                 elif "time" in msg:
                     print(f"[设备] 收到时间同步: {msg['time']}")
                 elif "ack" in msg:
@@ -161,24 +245,35 @@ async def main():
                 else:
                     # 这是快照消息
                     state.entries = msg.get("entries", [])
+                    state.suggestions = msg.get("suggestions")
                     if msg.get("waiting", 0) > 0:
                         state.pending = msg.get("prompt", {})
                         state.context = msg.get("context")
                         print(f"\n{'=' * 60}")
-                        print(f"[设备] 收到审批请求!")
+                        print("[设备] 收到审批请求!")
                         print(f"  ID: {state.pending.get('id')}")
                         print(f"  工具: {state.pending.get('tool')}")
-                        print(f"  提示: {state.pending.get('hint')}")
+                        print(f"  摘要: {state.pending.get('hint')}")
                         if state.context:
-                            print(f"  提示: 按 [C] 查看完整上下文")
+                            tool_info = _extract_tool_info(state.context)
+                            if tool_info:
+                                print(f"  详情:\n{tool_info}")
+                            print("  按 [C] 查看完整上下文")
+                        if state.suggestions:
+                            print("  可记住规则: [R] 查看")
                         print(f"{'=' * 60}")
-                        print(f"请选择: [A]允许  [D]拒绝  [C]查看上下文  [Q]退出")
+                        opts = "[A]允许  "
+                        if state.suggestions:
+                            opts += "[R]记住规则  "
+                        opts += "[D]拒绝  [C]详情  [Q]退出"
+                        print(f"请选择: {opts}")
                     else:
                         state.pending = None
                         state.context = None
-                        print(f"[设备] 当前无待审批请求")
+                        state.suggestions = None
+                        print("[设备] 当前无待审批请求")
                         if state.entries:
-                            print(f"[设备] 历史记录:")
+                            print("[设备] 历史记录:")
                             for entry in state.entries:
                                 print(f"  - {entry}")
 
@@ -194,7 +289,7 @@ async def main():
         try:
             writer.close()
             await writer.wait_closed()
-        except:
+        except Exception:
             pass
         print("[设备] 已断开连接")
 

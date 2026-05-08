@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCBB 审批</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+<style>
+  .card { margin-top: 1rem; }
+  .detail-block { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem; background: var(--pico-card-background-color); padding: 0.75rem 1rem; border-radius: var(--pico-border-radius); }
+  .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  .actions button { flex: 1; }
+  .status { text-align: center; padding: 2rem 0; color: var(--pico-muted-color); }
+  code { font-size: 1.5em; letter-spacing: 0.2em; }
+  .suggestion-item { padding: 0.5rem 0; border-bottom: 1px solid var(--pico-table-border-color); }
+  .suggestion-item:last-child { border-bottom: none; }
+</style>
+</head>
+<body>
+<main class="container" style="max-width:480px">
+  <hgroup>
+    <h2>CCBB 审批</h2>
+    <p id="status-text">正在配对…</p>
+  </hgroup>
+
+  <!-- 配对中 -->
+  <article id="view-pairing" class="card">
+    <div class="status">
+      <div>配对码</div>
+      <code id="code-display">------</code>
+      <div style="margin-top:1rem">正在连接…</div>
+    </div>
+  </article>
+
+  <!-- 等待审批 -->
+  <article id="view-waiting" class="card" hidden>
+    <div class="status">
+      ✅ 已配对，等待审批请求…
+    </div>
+  </article>
+
+  <!-- 审批请求 -->
+  <article id="view-request" class="card" hidden>
+    <header><strong id="req-tool"></strong></header>
+    <div id="req-hint" class="detail-block"></div>
+    <details id="req-details" style="margin-top:0.5rem">
+      <summary>查看详情</summary>
+      <div id="req-context" class="detail-block" style="max-height:200px;overflow:auto"></div>
+    </details>
+    <div id="req-suggestions" hidden style="margin-top:0.5rem">
+      <details>
+        <summary>记住规则</summary>
+        <div id="suggestions-list"></div>
+      </details>
+    </div>
+    <div class="actions">
+      <button id="btn-allow" class="contrast" onclick="decide('once')">允许</button>
+      <button id="btn-deny" class="secondary outline" onclick="decide('deny')">拒绝</button>
+    </div>
+  </article>
+
+  <!-- 已完成 -->
+  <article id="view-done" class="card" hidden>
+    <div class="status" id="done-text"></div>
+  </article>
+</main>
+
+<script>
+const params = new URLSearchParams(location.search);
+const code = params.get('code') || '';
+let sessionId = '';
+let currentId = '';
+let evtSource = null;
+
+const $ = id => document.getElementById(id);
+
+function showView(name) {
+  ['pairing','waiting','request','done'].forEach(v => {
+    $('view-' + v).hidden = v !== name;
+  });
+}
+
+async function pair() {
+  if (!code) {
+    $('status-text').textContent = '缺少配对码';
+    return;
+  }
+  $('code-display').textContent = code;
+
+  try {
+    const resp = await fetch('/api/pair', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({code}),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      $('status-text').textContent = data.error || '配对失败';
+      return;
+    }
+    sessionId = data.session_id;
+    $('status-text').textContent = '已配对';
+    showView('waiting');
+    openStream();
+  } catch (e) {
+    $('status-text').textContent = '连接失败: ' + e.message;
+  }
+}
+
+function openStream() {
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/api/stream?session_id=' + encodeURIComponent(sessionId));
+
+  evtSource.addEventListener('request', e => {
+    const data = JSON.parse(e.data);
+    currentId = data.id;
+    window._currentSuggestions = data.suggestions || [];
+    $('req-tool').textContent = data.tool;
+    $('req-hint').textContent = data.hint;
+    $('req-context').textContent = data.context ? JSON.stringify(data.context, null, 2) : '';
+
+    if (window._currentSuggestions.length > 0) {
+      $('req-suggestions').hidden = false;
+      const list = $('suggestions-list');
+      list.innerHTML = '';
+      window._currentSuggestions.forEach((sug, si) => {
+        (sug.addRules || []).forEach((rule, ri) => {
+          const div = document.createElement('div');
+          div.className = 'suggestion-item';
+          div.innerHTML = '<label><input type="checkbox" data-si="'+si+'" data-ri="'+ri+'"> ' + (rule.behavior || 'allow') + ' → ' + (rule.tool || '*') + '</label>';
+          list.appendChild(div);
+        });
+      });
+    } else {
+      $('req-suggestions').hidden = true;
+    }
+
+    $('status-text').textContent = '收到审批请求';
+    showView('request');
+  });
+
+  evtSource.addEventListener('done', e => {
+    const data = JSON.parse(e.data);
+    $('done-text').textContent = '审批已完成: ' + data.decision;
+    $('status-text').textContent = '等待下一个请求…';
+    showView('done');
+    setTimeout(() => showView('waiting'), 2000);
+  });
+
+  evtSource.addEventListener('session_end', () => {
+    $('done-text').textContent = '会话已结束';
+    $('status-text').textContent = '会话已结束';
+    showView('done');
+    evtSource.close();
+  });
+
+  evtSource.onerror = () => {
+    // 自动重连由 EventSource 处理
+  };
+}
+
+async function decide(decision) {
+  const body = {session_id: sessionId, id: currentId, decision};
+
+  // 收集选中的 suggestions
+  const checks = document.querySelectorAll('#suggestions-list input[type=checkbox]:checked');
+  if (checks.length > 0 && window._currentSuggestions) {
+    const selected = [];
+    checks.forEach(cb => {
+      const si = parseInt(cb.dataset.si);
+      const ri = parseInt(cb.dataset.ri);
+      const rule = window._currentSuggestions[si]?.addRules?.[ri];
+      if (rule) selected.push(rule);
+    });
+    if (selected.length > 0) {
+      body.updated_permissions = selected;
+    }
+  }
+
+  try {
+    await fetch('/api/decide', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    $('status-text').textContent = '已发送，等待下一个请求…';
+    showView('waiting');
+  } catch (e) {
+    $('status-text').textContent = '发送失败: ' + e.message;
+  }
+}
+
+pair();
+</script>
+</body>
+</html>

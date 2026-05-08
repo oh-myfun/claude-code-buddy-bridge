@@ -79,6 +79,7 @@ class Session:
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_request: Optional[PendingRequest] = None
     entries: list[str] = field(default_factory=list)
+    web_queues: list = field(default_factory=list)  # SSE 订阅者
 
 
 @dataclass
@@ -224,6 +225,14 @@ class Bridge:
                 "cmd": "session_end", "session_id": session_id,
             }))
         session.paired_devices.clear()
+
+        # 通知 web 订阅者
+        for q in list(session.web_queues):
+            try:
+                q.put_nowait({"type": "session_end", "data": {"session_id": session_id}})
+            except Exception:
+                pass
+        session.web_queues.clear()
 
         # 取消挂起的请求
         if session.pending_request and not session.pending_request.decision_future.done():
@@ -467,9 +476,9 @@ class Bridge:
 
         logger.info(f"收到请求 session={session_id[:8]}... id={rid} tool={tool}")
 
-        # 等待设备配对（最多 60 秒）
+        # 等待设备或 web 客户端配对（最多 60 秒）
         wait_start = time.time()
-        while not session.paired_devices:
+        while not session.paired_devices and not session.web_queues:
             if time.time() - wait_start > 60.0:
                 logger.warning(f"等待设备配对超时 session={session_id[:8]}...")
                 writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
@@ -497,6 +506,17 @@ class Bridge:
             except Exception as e:
                 logger.warning(f"发送快照到 {dev.addr} 失败: {e}")
 
+        # 推送审批请求到 web 订阅者
+        request_event = {
+            "id": rid, "tool": tool, "hint": hint,
+            "context": context, "suggestions": suggestions,
+        }
+        for q in list(session.web_queues):
+            try:
+                q.put_nowait({"type": "request", "data": request_event})
+            except Exception:
+                pass
+
         # 等待决策或超时
         try:
             result = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
@@ -514,6 +534,13 @@ class Bridge:
                     "id": rid,
                     "decision": decision_str,
                 })
+            except Exception:
+                pass
+
+        # 推送审批结束到 web 订阅者
+        for q in list(session.web_queues):
+            try:
+                q.put_nowait({"type": "done", "data": {"id": rid, "decision": decision_str}})
             except Exception:
                 pass
 
@@ -558,8 +585,18 @@ class Bridge:
             writer.close()
             return
 
+        first_str = first_line.decode("utf-8", errors="replace").strip()
+
+        # HTTP 协议检测
+        if first_str.startswith(("GET ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "HEAD ")):
+            logger.info(f"[{addr}] 识别为 HTTP 连接")
+            from ccbb.web.handler import WebHandler
+            handler = WebHandler(self)
+            await handler.handle(reader, writer, first_str)
+            return
+
         try:
-            msg = json.loads(first_line.decode("utf-8"))
+            msg = json.loads(first_str)
         except Exception as e:
             logger.warning(f"[{addr}] JSON 解析失败: {e}")
             writer.close()

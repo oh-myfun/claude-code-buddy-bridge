@@ -17,7 +17,7 @@ ccbb.bridge — 守护进程核心
 
 关键设计
 --------
-1. PERMISSION_TIMEOUT=110s（必须小于 CC hook 超时 120s）
+1. 超时由 Claude Code 管理，hook 断开时 bridge 自动感知
 2. Fail-open：bridge 未运行时，CC 走自己的权限对话框
 3. SessionEnd 火速清理（不 await 通知）
 4. 跨平台：Windows、macOS、Linux 统一使用 TCP
@@ -41,7 +41,6 @@ from typing import Optional, Set, Dict
 # ── 常量 ───────────────────────────────────────────────────────────────────
 TCP_HOST_DEFAULT = "0.0.0.0"
 TCP_PORT_DEFAULT = 9876
-PERMISSION_TIMEOUT = 110.0  # 秒，必须小于 CC hook 超时（120s）
 ENTRIES_MAX = 5
 
 logger = logging.getLogger("ccbb.bridge")
@@ -64,11 +63,8 @@ def truncate(text: str, max_len: int = 60) -> str:
 @dataclass
 class PendingRequest:
     id: str
-    tool: str
-    hint: str
     decision_future: asyncio.Future
-    context: Optional[dict] = None
-    suggestions: Optional[list] = None
+    raw: dict  # hook 发来的完整请求，透传给设备/web
 
 
 @dataclass
@@ -364,24 +360,18 @@ class Bridge:
             pass
 
     async def _handle_permission_decision(self, device: DeviceConnection, msg: dict) -> None:
-        """处理审批决策"""
+        """处理审批决策：透传给 hook"""
         mid = msg.get("id")
-        decision = msg.get("decision")
-        updated_permissions = msg.get("updated_permissions")
-        if not mid or not decision:
+        if not mid:
             logger.warning(f"无效的审批决策: {msg}")
             return
 
+        # 提取 decision 对象（去掉 bridge 路由字段）
+        decision = {k: v for k, v in msg.items() if k not in ("cmd", "id")}
+
         session = self._sessions.get(device.session_id or "")
         if session and session.pending_request and session.pending_request.id == mid:
-            # 将 updated_permissions 附加到 future 结果
-            if updated_permissions:
-                session.pending_request.decision_future.set_result({
-                    "decision": decision,
-                    "updated_permissions": updated_permissions,
-                })
-            else:
-                session.pending_request.decision_future.set_result(decision)
+            session.pending_request.decision_future.set_result(decision)
             session.pending_request = None
             logger.info(f"收到决策 id={mid} decision={decision}")
         else:
@@ -398,23 +388,23 @@ class Bridge:
     # ── 快照 ────────────────────────────────────────────────────────────────
 
     async def _send_device_snapshot(self, device: DeviceConnection, session: Session) -> None:
-        """发送快照给设备"""
+        """发送快照给设备（透传原始请求）"""
         if session.pending_request:
+            raw = session.pending_request.raw
             snapshot = {
                 "total": 1, "running": 0, "waiting": 1,
-                "msg": truncate(f"approve: {session.pending_request.tool}"),
+                "msg": truncate(f"approve: {raw.get('tool', '?')}"),
                 "entries": list(reversed(session.entries[:ENTRIES_MAX])),
                 "tokens": 0, "tokens_today": 0,
                 "prompt": {
                     "id": session.pending_request.id,
-                    "tool": truncate(session.pending_request.tool),
-                    "hint": truncate(session.pending_request.hint),
+                    "tool": truncate(raw.get("tool", "?")),
+                    "hint": truncate(raw.get("hint", "")),
                 },
+                "context": raw.get("context"),
+                "tool_input": (raw.get("context") or {}).get("tool_input"),
+                "suggestions": (raw.get("context") or {}).get("permission_suggestions"),
             }
-            if session.pending_request.context:
-                snapshot["context"] = session.pending_request.context
-            if session.pending_request.suggestions:
-                snapshot["suggestions"] = session.pending_request.suggestions
         else:
             snapshot = {
                 "total": 0, "running": 0, "waiting": 0,
@@ -429,6 +419,7 @@ class Bridge:
     async def _handle_hook(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                            first_msg: dict) -> None:
         """处理 Hook 连接"""
+        session_id = ""
         try:
             action = first_msg.get("action")
 
@@ -444,7 +435,8 @@ class Bridge:
 
             else:
                 # PermissionRequest
-                await self._process_permission_request(first_msg, writer)
+                session_id = first_msg.get("session_id", "")
+                await self._process_permission_request(first_msg, writer, reader)
 
         except Exception as e:
             logger.error(f"Hook 连接处理异常: {e}")
@@ -454,8 +446,9 @@ class Bridge:
             except Exception:
                 pass
 
-    async def _process_permission_request(self, msg: dict, writer: asyncio.StreamWriter) -> None:
-        """处理审批请求"""
+    async def _process_permission_request(self, msg: dict, writer: asyncio.StreamWriter,
+                                           reader: asyncio.StreamReader) -> None:
+        """处理审批请求：广播给所有订阅者，等待设备响应或 hook 断开，再广播结果"""
         session_id = msg.get("session_id", "")
         if not session_id:
             logger.warning("PermissionRequest 缺少 session_id")
@@ -467,91 +460,81 @@ class Bridge:
             return
 
         rid = str(msg.get("id") or f"req_{int(time.time() * 1000)}")
-        tool = str(msg.get("tool") or "?")
-        hint = str(msg.get("hint") or "")
-        context = msg.get("context") if isinstance(msg.get("context"), dict) else None
-        suggestions = None
-        if context and isinstance(context.get("permission_suggestions"), list):
-            suggestions = context["permission_suggestions"]
+        logger.info(f"收到请求 session={session_id[:8]}... id={rid}")
 
-        logger.info(f"收到请求 session={session_id[:8]}... id={rid} tool={tool}")
-
-        # 等待设备或 web 客户端配对（最多 60 秒）
-        wait_start = time.time()
-        while not session.paired_devices and not session.web_queues:
-            if time.time() - wait_start > 60.0:
-                logger.warning(f"等待设备配对超时 session={session_id[:8]}...")
-                writer.write(json.dumps({"decision": "timeout"}).encode() + b"\n")
-                await writer.drain()
-                return
-            # 会话可能已被销毁
-            if session_id not in self._sessions:
-                return
-            await asyncio.sleep(0.5)
-
-        # 创建待处理请求
+        # 创建待处理请求（透传原始数据）
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        session.pending_request = PendingRequest(
-            id=rid, tool=tool, hint=hint, decision_future=fut,
-            context=context, suggestions=suggestions,
-        )
+        session.pending_request = PendingRequest(id=rid, decision_future=fut, raw=msg)
+
+        tool = msg.get("tool") or "?"
+        hint = msg.get("hint") or ""
         session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool}: {hint}', 50)}")
         session.entries = session.entries[:ENTRIES_MAX]
 
-        # 发送快照到所有配对设备
+        # 广播审批请求到所有订阅者（透传）
         for dev in list(session.paired_devices):
             try:
                 await self._send_device_snapshot(dev, session)
             except Exception as e:
                 logger.warning(f"发送快照到 {dev.addr} 失败: {e}")
 
-        # 推送审批请求到 web 订阅者
-        request_event = {
-            "id": rid, "tool": tool, "hint": hint,
-            "context": context, "suggestions": suggestions,
-        }
         for q in list(session.web_queues):
             try:
-                q.put_nowait({"type": "request", "data": request_event})
+                q.put_nowait({"type": "request", "data": msg})
             except Exception:
                 pass
 
-        # 等待决策或超时
-        try:
-            result = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
-        except asyncio.TimeoutError:
-            result = "timeout"
-            session.pending_request = None
-            logger.warning(f"id={rid} 审批超时")
+        # 等待：设备/web 响应 或 hook 断开（超时由 Claude Code 管理）
+        hook_disconnected = False
 
-        # 通知所有配对设备审批结束
-        decision_str = result if isinstance(result, str) else result.get("decision", "timeout")
+        async def _watch_hook():
+            """安全检测 hook 断开，抑制所有异常"""
+            try:
+                await reader.read(1)
+            except Exception:
+                pass
+
+        reader_task = asyncio.ensure_future(_watch_hook())
+        fut_task = asyncio.ensure_future(fut)
+        done, pending = await asyncio.wait(
+            [fut_task, reader_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+
+        if fut_task in done:
+            result = fut_task.result()
+        else:
+            result = "closed"
+            hook_disconnected = True
+            logger.info(f"id={rid} Hook 连接已断开")
+        session.pending_request = None
+
+        # 广播审批结束到所有订阅者
+        behavior = result.get("behavior", "closed") if isinstance(result, dict) else (result or "closed")
         for dev in list(session.paired_devices):
             try:
                 await self._send_to_device(dev, {
                     "cmd": "permission_done",
                     "id": rid,
-                    "decision": decision_str,
+                    "decision": behavior,
                 })
             except Exception:
                 pass
-
-        # 推送审批结束到 web 订阅者
         for q in list(session.web_queues):
             try:
-                q.put_nowait({"type": "done", "data": {"id": rid, "decision": decision_str}})
+                q.put_nowait({"type": "done", "data": {"id": rid, "decision": behavior}})
             except Exception:
                 pass
 
-        # 构建响应发送给 Hook
-        if isinstance(result, dict):
-            resp = result
-        else:
-            resp = {"decision": result}
-        writer.write(json.dumps(resp).encode() + b"\n")
-        await writer.drain()
-        logger.info(f"id={rid} → decision={resp.get('decision')}")
+        # 响应 Hook（透传 decision 对象，hook 断开则跳过）
+        if not hook_disconnected:
+            resp = result if isinstance(result, dict) else {"behavior": result}
+            writer.write(json.dumps(resp).encode() + b"\n")
+            await writer.drain()
+            logger.info(f"id={rid} → {resp.get('behavior', resp)}")
 
     # ── 连接识别与分发 ──────────────────────────────────────────────────────
 

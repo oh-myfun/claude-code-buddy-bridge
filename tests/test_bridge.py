@@ -321,11 +321,12 @@ class TestSuggestions:
         loop = asyncio.new_event_loop()
         fut = loop.create_future()
         req = PendingRequest(
-            id="test-id", tool="Bash", hint="ls",
-            decision_future=fut, suggestions=[{"addRules": [{"behavior": "allow"}]}],
+            id="test-id", decision_future=fut,
+            raw={"id": "test-id", "tool": "Bash", "hint": "ls",
+                 "context": {"permission_suggestions": [{"rules": [{"behavior": "allow"}]}]}},
         )
-        assert req.suggestions is not None
-        assert len(req.suggestions) == 1
+        ctx = req.raw.get("context", {})
+        assert ctx.get("permission_suggestions") is not None
         loop.close()
 
     def test_snapshot_includes_suggestions(self, bridge, mock_writer):
@@ -345,10 +346,10 @@ class TestSuggestions:
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
             session.pending_request = PendingRequest(
-                id="req-1", tool="Bash", hint="rm -rf /",
-                decision_future=fut,
-                context={"tool_input": {"command": "rm -rf /"}},
-                suggestions=[{"addRules": [{"behavior": "allow", "tool": "Bash"}]}],
+                id="req-1", decision_future=fut,
+                raw={"id": "req-1", "tool": "Bash", "hint": "rm -rf /",
+                     "context": {"tool_input": {"command": "rm -rf /"},
+                                 "permission_suggestions": [{"rules": [{"behavior": "allow", "toolName": "Bash"}]}]}},
             )
 
             await bridge._send_device_snapshot(device, session)
@@ -378,21 +379,24 @@ class TestSuggestions:
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
             session.pending_request = PendingRequest(
-                id="req-up", tool="Bash", hint="ls",
-                decision_future=fut,
+                id="req-up", decision_future=fut,
+                raw={"id": "req-up", "tool": "Bash", "hint": "ls", "context": {}},
             )
 
-            # 发送带 updated_permissions 的决策
-            updated_perms = [{"addRules": [{"behavior": "allow", "tool": "Bash"}]}]
+            # 发送带 updatedPermissions 的决策（CC 协议格式）
+            updated_perms = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls"}], "behavior": "allow", "destination": "localSettings"}]
             await bridge._handle_permission_decision(device, {
+                "cmd": "permission",
                 "id": "req-up",
-                "decision": "once",
-                "updated_permissions": updated_perms,
+                "behavior": "allow",
+                "updatedPermissions": updated_perms,
             })
 
             result = fut.result()
             assert isinstance(result, dict)
-            assert result["decision"] == "once"
-            assert result["updated_permissions"] == updated_perms
+            assert result["behavior"] == "allow"
+            assert result["updatedPermissions"] == updated_perms
+            assert "cmd" not in result  # 路由字段已剥离
+            assert "id" not in result
 
         asyncio.run(run_test())

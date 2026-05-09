@@ -6,14 +6,35 @@
 <title>CCBB 审批</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
 <style>
-  .card { margin-top: 1rem; }
-  .detail-block { white-space: pre-wrap; word-break: break-all; font-size: 0.85rem; background: var(--pico-card-background-color); padding: 0.75rem 1rem; border-radius: var(--pico-border-radius); }
-  .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
-  .actions button { flex: 1; }
+  body { padding-bottom: 2rem; }
+  hgroup { margin-bottom: 0; }
+  hgroup p { margin-bottom: 0; }
+  .card { margin-top: 0.75rem; }
   .status { text-align: center; padding: 2rem 0; color: var(--pico-muted-color); }
-  code { font-size: 1.5em; letter-spacing: 0.2em; }
-  .suggestion-item { padding: 0.5rem 0; border-bottom: 1px solid var(--pico-table-border-color); }
+  code.pair-code { font-size: 1.5em; letter-spacing: 0.25em; }
+  .tool-tag {
+    display: inline-block; padding: 0.1em 0.6em; border-radius: 4px;
+    font-size: 0.8em; font-weight: 700; letter-spacing: 0.03em;
+    background: var(--pico-primary-background); color: var(--pico-primary-inverse);
+  }
+  .req-section { margin-top: 0.75rem; }
+  .req-label { font-size: 0.75em; color: var(--pico-muted-color); margin-bottom: 0.15em; text-transform: uppercase; letter-spacing: 0.05em; }
+  .req-value {
+    font-size: 0.88em; word-break: break-all; white-space: pre-wrap;
+    background: var(--pico-card-background-color); padding: 0.6em 0.8em;
+    border-radius: var(--pico-border-radius); border: 1px solid var(--pico-table-border-color);
+  }
+  .req-value.cmd { font-family: var(--pico-font-family-monospace); }
+  .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  .actions button { flex: 1; padding: 0.6em; }
+  .suggestion-item {
+    padding: 0.5em 0; border-bottom: 1px solid var(--pico-table-border-color);
+    font-size: 0.85em;
+  }
   .suggestion-item:last-child { border-bottom: none; }
+  .suggestion-dest { color: var(--pico-muted-color); font-size: 0.85em; }
+  details summary { font-size: 0.85em; }
+  #req-context { font-size: 0.75em; max-height: 240px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -27,35 +48,31 @@
   <article id="view-pairing" class="card">
     <div class="status">
       <div>配对码</div>
-      <code id="code-display">------</code>
+      <code class="pair-code" id="code-display">------</code>
       <div style="margin-top:1rem">正在连接…</div>
     </div>
   </article>
 
   <!-- 等待审批 -->
   <article id="view-waiting" class="card" hidden>
-    <div class="status">
-      ✅ 已配对，等待审批请求…
-    </div>
+    <div class="status">已配对，等待审批请求…</div>
   </article>
 
   <!-- 审批请求 -->
   <article id="view-request" class="card" hidden>
-    <header><strong id="req-tool"></strong></header>
-    <div id="req-hint" class="detail-block"></div>
+    <header><span class="tool-tag" id="req-tool"></span></header>
+    <div id="req-info"></div>
     <details id="req-details" style="margin-top:0.5rem">
-      <summary>查看详情</summary>
-      <div id="req-context" class="detail-block" style="max-height:200px;overflow:auto"></div>
+      <summary>查看原始数据</summary>
+      <div id="req-context" class="req-value"></div>
     </details>
-    <div id="req-suggestions" hidden style="margin-top:0.5rem">
-      <details>
-        <summary>记住规则</summary>
-        <div id="suggestions-list"></div>
-      </details>
+    <div id="req-suggestions" hidden style="margin-top:0.75rem">
+      <div class="req-label">记住规则</div>
+      <div id="suggestions-list" class="req-value" style="padding:0.3em 0.8em"></div>
     </div>
     <div class="actions">
-      <button id="btn-allow" class="contrast" onclick="decide('once')">允许</button>
-      <button id="btn-deny" class="secondary outline" onclick="decide('deny')">拒绝</button>
+      <button class="contrast" onclick="decide('allow')">允许</button>
+      <button class="secondary outline" onclick="decide('deny')">拒绝</button>
     </div>
   </article>
 
@@ -80,13 +97,74 @@ function showView(name) {
   });
 }
 
-async function pair() {
-  if (!code) {
-    $('status-text').textContent = '缺少配对码';
-    return;
-  }
-  $('code-display').textContent = code;
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
 
+function infoBlock(label, value, cls) {
+  return '<div class="req-section"><div class="req-label">' + esc(label)
+    + '</div><div class="req-value' + (cls ? ' ' + cls : '') + '">' + esc(value) + '</div></div>';
+}
+
+function buildInfoHtml(msg) {
+  const ctx = msg.context || {};
+  const tool = msg.tool || ctx.tool_name || '?';
+  const input = ctx.tool_input;
+  const hint = msg.hint || '';
+  const html = [];
+
+  if (typeof input === 'object' && input) {
+    if (tool === 'Bash') {
+      if (input.command) html.push(infoBlock('命令', input.command, 'cmd'));
+      if (input.description) html.push(infoBlock('说明', input.description));
+    } else if (tool === 'Write' || tool === 'Edit') {
+      if (input.file_path) html.push(infoBlock('文件', input.file_path, 'cmd'));
+      const c = input.content || input.new_text || input.old_string;
+      if (c) html.push(infoBlock('内容', String(c).substring(0, 300)));
+    } else if (tool === 'Agent') {
+      if (input.description) html.push(infoBlock('描述', input.description));
+      if (input.prompt) html.push(infoBlock('提示', String(input.prompt).substring(0, 300)));
+    } else {
+      for (const k of ['command','file_path','url','path','pattern','query','prompt','description']) {
+        if (typeof input[k] === 'string' && input[k]) {
+          html.push(infoBlock(k, input[k], k === 'command' || k === 'file_path' ? 'cmd' : ''));
+          break;
+        }
+      }
+    }
+  }
+  if (html.length === 0 && hint) html.push(infoBlock('操作', hint));
+  return html.join('');
+}
+
+function buildSuggestionsHtml(suggestions) {
+  if (!suggestions || !suggestions.length) return '';
+  let html = '';
+  suggestions.forEach((sug, si) => {
+    const rules = sug.rules || [];
+    const dest = sug.destination || '';
+    rules.forEach((rule, ri) => {
+      const bl = sug.behavior === 'allow' ? '允许' : sug.behavior === 'deny' ? '拒绝' : sug.behavior;
+      const tn = rule.toolName || '*';
+      const rc = rule.ruleContent || '';
+      const desc = rc ? bl + ' ' + tn + ': ' + rc : bl + ' → ' + tn;
+      html += '<div class="suggestion-item"><label><input type="checkbox" data-si="'+si+'" data-ri="'+ri+'"> '
+        + esc(desc) + (dest ? ' <span class="suggestion-dest">→ ' + esc(dest) + '</span>' : '')
+        + '</label></div>';
+    });
+    if (sug.type === 'setMode') {
+      html += '<div class="suggestion-item"><label><input type="checkbox" data-si="'+si+'" data-ri="0"> '
+        + '切换模式: ' + esc(sug.mode || '?') + '</label></div>';
+    }
+  });
+  return html;
+}
+
+async function pair() {
+  if (!code) { $('status-text').textContent = '缺少配对码'; return; }
+  $('code-display').textContent = code;
   try {
     const resp = await fetch('/api/pair', {
       method: 'POST',
@@ -94,10 +172,7 @@ async function pair() {
       body: JSON.stringify({code}),
     });
     const data = await resp.json();
-    if (!resp.ok) {
-      $('status-text').textContent = data.error || '配对失败';
-      return;
-    }
+    if (!resp.ok) { $('status-text').textContent = data.error || '配对失败'; return; }
     sessionId = data.session_id;
     $('status-text').textContent = '已配对';
     showView('waiting');
@@ -112,25 +187,18 @@ function openStream() {
   evtSource = new EventSource('/api/stream?session_id=' + encodeURIComponent(sessionId));
 
   evtSource.addEventListener('request', e => {
-    const data = JSON.parse(e.data);
-    currentId = data.id;
-    window._currentSuggestions = data.suggestions || [];
-    $('req-tool').textContent = data.tool;
-    $('req-hint').textContent = data.hint;
-    $('req-context').textContent = data.context ? JSON.stringify(data.context, null, 2) : '';
+    const msg = JSON.parse(e.data);
+    const ctx = msg.context || {};
+    currentId = msg.id;
+    window._currentSuggestions = ctx.permission_suggestions || [];
+
+    $('req-tool').textContent = msg.tool || ctx.tool_name || '?';
+    $('req-info').innerHTML = buildInfoHtml(msg) || infoBlock('操作', msg.hint || '');
+    $('req-context').textContent = JSON.stringify(ctx, null, 2);
 
     if (window._currentSuggestions.length > 0) {
       $('req-suggestions').hidden = false;
-      const list = $('suggestions-list');
-      list.innerHTML = '';
-      window._currentSuggestions.forEach((sug, si) => {
-        (sug.addRules || []).forEach((rule, ri) => {
-          const div = document.createElement('div');
-          div.className = 'suggestion-item';
-          div.innerHTML = '<label><input type="checkbox" data-si="'+si+'" data-ri="'+ri+'"> ' + (rule.behavior || 'allow') + ' → ' + (rule.tool || '*') + '</label>';
-          list.appendChild(div);
-        });
-      });
+      $('suggestions-list').innerHTML = buildSuggestionsHtml(window._currentSuggestions);
     } else {
       $('req-suggestions').hidden = true;
     }
@@ -139,9 +207,10 @@ function openStream() {
     showView('request');
   });
 
+  const labels = {allow: '允许', deny: '拒绝', closed: '已在其他设备完成'};
   evtSource.addEventListener('done', e => {
     const data = JSON.parse(e.data);
-    $('done-text').textContent = '审批已完成: ' + data.decision;
+    $('done-text').textContent = '审批已完成: ' + (labels[data.decision] || data.decision);
     $('status-text').textContent = '等待下一个请求…';
     showView('done');
     setTimeout(() => showView('waiting'), 2000);
@@ -154,29 +223,32 @@ function openStream() {
     evtSource.close();
   });
 
-  evtSource.onerror = () => {
-    // 自动重连由 EventSource 处理
+  evtSource.onopen = () => {
+    $('status-text').textContent = '已配对，等待审批请求…';
+    showView('waiting');
   };
+
+  evtSource.onerror = () => {};
 }
 
-async function decide(decision) {
-  const body = {session_id: sessionId, id: currentId, decision};
-
-  // 收集选中的 suggestions
+async function decide(behavior) {
+  const body = {session_id: sessionId, id: currentId, behavior};
   const checks = document.querySelectorAll('#suggestions-list input[type=checkbox]:checked');
   if (checks.length > 0 && window._currentSuggestions) {
-    const selected = [];
+    const sel = [];
     checks.forEach(cb => {
       const si = parseInt(cb.dataset.si);
       const ri = parseInt(cb.dataset.ri);
-      const rule = window._currentSuggestions[si]?.addRules?.[ri];
-      if (rule) selected.push(rule);
+      const sug = window._currentSuggestions[si];
+      if (!sug) return;
+      const rules = sug.rules || [];
+      if (sug.type === 'setMode') { sel.push(sug); }
+      else if (rules[ri]) {
+        sel.push({type: sug.type || 'addRules', rules: [rules[ri]], behavior: sug.behavior, destination: sug.destination});
+      }
     });
-    if (selected.length > 0) {
-      body.updated_permissions = selected;
-    }
+    if (sel.length > 0) body.updatedPermissions = sel;
   }
-
   try {
     await fetch('/api/decide', {
       method: 'POST',

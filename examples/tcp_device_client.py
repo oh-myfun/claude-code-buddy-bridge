@@ -32,14 +32,61 @@ _HINT_KEYS = ("command", "file_path", "url", "path", "pattern", "query", "prompt
 def _extract_tool_info(context: dict) -> str:
     """从 context 中提取 tool_input 的关键信息"""
     tool_input = context.get("tool_input")
+    tool_name = context.get("tool_name", "?")
+
     if not isinstance(tool_input, dict):
         return str(tool_input) if tool_input else ""
+
     parts = []
-    for key in _HINT_KEYS:
-        val = tool_input.get(key)
-        if isinstance(val, str) and val:
-            parts.append(f"  {key}: {val[:200]}")
+
+    # Bash: command + description
+    if tool_name == "Bash":
+        if tool_input.get("command"):
+            parts.append(f"  命令: {tool_input['command'][:200]}")
+        if tool_input.get("description"):
+            parts.append(f"  说明: {tool_input['description'][:200]}")
+    # Write/Edit: file_path + content
+    elif tool_name in ("Write", "Edit"):
+        if tool_input.get("file_path"):
+            parts.append(f"  文件: {tool_input['file_path']}")
+        content = tool_input.get("content") or tool_input.get("new_text") or tool_input.get("old_string")
+        if content:
+            parts.append(f"  内容: {str(content)[:200]}")
+    # Agent: description + prompt
+    elif tool_name == "Agent":
+        if tool_input.get("description"):
+            parts.append(f"  描述: {tool_input['description'][:200]}")
+        if tool_input.get("prompt"):
+            parts.append(f"  提示: {str(tool_input['prompt'])[:200]}")
+    else:
+        for key in _HINT_KEYS:
+            val = tool_input.get(key)
+            if isinstance(val, str) and val:
+                parts.append(f"  {key}: {val[:200]}")
+
     return "\n".join(parts) if parts else json.dumps(tool_input, indent=2, ensure_ascii=False)[:200]
+
+
+def _format_suggestions(suggestions: list) -> str:
+    """格式化审批规则建议"""
+    lines = []
+    for i, sug in enumerate(suggestions):
+        sug_type = sug.get("type", "addRules")
+        behavior = sug.get("behavior", "allow")
+        dest = sug.get("destination", "")
+        rules = sug.get("rules") or sug.get("addRules") or []
+
+        if sug_type == "setMode":
+            lines.append(f"  [{i}] 切换模式: {sug.get('mode', '?')} → {dest}")
+        else:
+            for j, rule in enumerate(rules):
+                tool_name = rule.get("toolName") or rule.get("tool", "*")
+                content = rule.get("ruleContent") or rule.get("content", "")
+                bl = "允许" if behavior == "allow" else "拒绝" if behavior == "deny" else behavior
+                desc = f"{bl} {tool_name}" + (f": {content}" if content else "")
+                lines.append(f"  [{i}.{j}] {desc} → {dest}")
+
+    return "\n".join(lines)
 
 
 async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
@@ -88,7 +135,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 resp = {
                     "cmd": "permission",
                     "id": state.pending.get("id"),
-                    "decision": "once"
+                    "behavior": "allow",
                 }
                 print(f"[设备] 发送允许: {resp}")
                 writer.write((json.dumps(resp) + "\n").encode())
@@ -100,12 +147,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 # 记住规则 — 显示可用规则让用户选择
                 print(f"\n{'=' * 60}")
                 print("[设备] 可记住的审批规则:")
-                for i, sug in enumerate(state.suggestions):
-                    rules = sug.get("addRules", [])
-                    for j, rule in enumerate(rules):
-                        behavior = rule.get("behavior", "?")
-                        tool = rule.get("tool", "*")
-                        print(f"  [{i}.{j}] {behavior} → {tool}")
+                print(_format_suggestions(state.suggestions))
                 print(f"{'=' * 60}")
                 print("输入规则编号（如 0.0）或 [C] 取消")
             elif cmd.lower().startswith('r') and state.pending and state.suggestions:
@@ -115,12 +157,22 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 try:
                     si, ri = cmd.split('.')
                     sug = state.suggestions[int(si)]
-                    rule = sug.get("addRules", [])[int(ri)]
+                    rules = sug.get("rules") or sug.get("addRules") or []
+                    if sug.get("type") == "setMode":
+                        selected_rule = sug
+                    else:
+                        rule = rules[int(ri)]
+                        selected_rule = {
+                            "type": sug.get("type", "addRules"),
+                            "rules": [rule],
+                            "behavior": sug.get("behavior"),
+                            "destination": sug.get("destination"),
+                        }
                     resp = {
                         "cmd": "permission",
                         "id": state.pending.get("id"),
-                        "decision": "once",
-                        "updated_permissions": [sug],
+                        "behavior": "allow",
+                        "updatedPermissions": [selected_rule],
                     }
                     print(f"[设备] 发送允许并记住规则: {resp}")
                     writer.write((json.dumps(resp) + "\n").encode())
@@ -135,7 +187,8 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 resp = {
                     "cmd": "permission",
                     "id": state.pending.get("id"),
-                    "decision": "deny"
+                    "behavior": "deny",
+                    "message": "已通过 ccbb 拒绝此操作",
                 }
                 print(f"[设备] 发送拒绝: {resp}")
                 writer.write((json.dumps(resp) + "\n").encode())
@@ -249,24 +302,29 @@ async def main():
                     if msg.get("waiting", 0) > 0:
                         state.pending = msg.get("prompt", {})
                         state.context = msg.get("context")
+                        tool = state.pending.get("tool", "?")
+                        hint = state.pending.get("hint", "")
                         print(f"\n{'=' * 60}")
-                        print("[设备] 收到审批请求!")
-                        print(f"  ID: {state.pending.get('id')}")
-                        print(f"  工具: {state.pending.get('tool')}")
-                        print(f"  摘要: {state.pending.get('hint')}")
+                        print(f"  审批请求 | {tool}")
                         if state.context:
                             tool_info = _extract_tool_info(state.context)
                             if tool_info:
-                                print(f"  详情:\n{tool_info}")
-                            print("  按 [C] 查看完整上下文")
+                                print(tool_info)
+                            else:
+                                print(f"  {hint}")
+                            print("  [C] 查看完整上下文")
+                        else:
+                            print(f"  {hint}")
                         if state.suggestions:
-                            print("  可记住规则: [R] 查看")
+                            print(f"\n  可记住规则:")
+                            print(_format_suggestions(state.suggestions))
+                            print("  [R] 选择记住规则")
                         print(f"{'=' * 60}")
                         opts = "[A]允许  "
                         if state.suggestions:
                             opts += "[R]记住规则  "
                         opts += "[D]拒绝  [C]详情  [Q]退出"
-                        print(f"请选择: {opts}")
+                        print(f"  请选择: {opts}")
                     else:
                         state.pending = None
                         state.context = None

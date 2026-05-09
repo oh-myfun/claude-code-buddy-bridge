@@ -57,14 +57,14 @@ def _fail_open() -> None:
 
 def _emit_allow(updated_permissions: list | None = None) -> None:
     decision: dict = {"behavior": "allow"}
+    if updated_permissions:
+        decision["updatedPermissions"] = updated_permissions
     out: dict = {
         "hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
             "decision": decision,
         }
     }
-    if updated_permissions:
-        out["hookSpecificOutput"]["updatedPermissions"] = updated_permissions
     sys.stdout.write(json.dumps(out, ensure_ascii=False))
     sys.stdout.flush()
     sys.exit(0)
@@ -202,12 +202,17 @@ def _handle_permission_request(event: dict) -> None:
         payload = (json.dumps(req, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
         resp = _send_request(s, payload)
 
-        if resp and "decision" in resp:
-            decision = resp["decision"]
-            if decision == "once":
-                _emit_allow(resp.get("updated_permissions"))
-            elif decision == "deny":
-                _emit_deny("已通过 ccbb 拒绝此操作")
+        if resp and "behavior" in resp:
+            # bridge 透传的 decision 对象，直接包装输出
+            out = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": resp,
+                }
+            }
+            sys.stdout.write(json.dumps(out, ensure_ascii=False))
+            sys.stdout.flush()
+            sys.exit(0)
     finally:
         try:
             s.close()

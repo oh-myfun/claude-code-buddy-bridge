@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from urllib.parse import urlparse, parse_qs
+
+logger = logging.getLogger("ccbb.web")
 
 
 class HttpRequest:
@@ -149,22 +152,16 @@ class WebHandler:
             )
             await writer.drain()
 
-            # 如果已有 pending request，立即推送
+            # 如果已有 pending request，立即推送（透传）
             if session.pending_request:
-                await self._sse_push(writer, "request", {
-                    "id": session.pending_request.id,
-                    "tool": session.pending_request.tool,
-                    "hint": session.pending_request.hint,
-                    "context": session.pending_request.context,
-                    "suggestions": session.pending_request.suggestions,
-                })
+                await self._sse_push(writer, "request", session.pending_request.raw)
 
             # 等待事件
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     await self._sse_push(writer, event["type"], event["data"])
-                    if event["type"] in ("done", "session_end"):
+                    if event["type"] == "session_end":
                         break
                 except asyncio.TimeoutError:
                     await self._sse_push(writer, "ping", {})
@@ -187,21 +184,18 @@ class WebHandler:
 
         session_id = body.get("session_id", "")
         mid = body.get("id", "")
-        decision = body.get("decision", "")
-        updated_permissions = body.get("updated_permissions")
+
+        # 提取 decision 对象（去掉 bridge 路由字段），透传给 hook
+        decision = {k: v for k, v in body.items() if k not in ("session_id", "id")}
+
+        logger.info(f"Web 审批决策: id={mid} decision={decision}")
 
         session = self._bridge._sessions.get(session_id)
         if not session or not session.pending_request or session.pending_request.id != mid:
             self._send_json(writer, 404, {"error": "Request not found"})
             return
 
-        if updated_permissions:
-            session.pending_request.decision_future.set_result({
-                "decision": decision,
-                "updated_permissions": updated_permissions,
-            })
-        else:
-            session.pending_request.decision_future.set_result(decision)
+        session.pending_request.decision_future.set_result(decision)
         session.pending_request = None
 
         self._send_json(writer, 200, {"ok": True})

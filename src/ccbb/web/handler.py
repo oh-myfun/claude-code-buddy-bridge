@@ -72,7 +72,7 @@ class WebHandler:
                 await self._api_pair(writer, req)
             elif req.method == "GET" and req.path == "/api/stream":
                 await self._api_stream(writer, req)
-            elif req.method == "POST" and req.path == "/api/decide":
+            elif req.method == "POST" and req.path.startswith("/api/decide"):
                 await self._api_decide(writer, req)
             else:
                 self._send_response(writer, 404, "Not Found")
@@ -176,23 +176,26 @@ class WebHandler:
     # ── API: 审批决策 ───────────────────────────────────────────────────────
 
     async def _api_decide(self, writer: asyncio.StreamWriter, req: HttpRequest) -> None:
+        session_id = req.query.get("session_id", [""])[0]
+        if not session_id:
+            self._send_json(writer, 400, {"error": "Missing session_id"})
+            return
+
         try:
-            body = json.loads(req.body.decode("utf-8"))
+            decision = json.loads(req.body.decode("utf-8"))
         except Exception:
             self._send_json(writer, 400, {"error": "Invalid JSON"})
             return
 
-        session_id = body.get("session_id", "")
-        mid = body.get("id", "")
+        if "behavior" not in decision:
+            self._send_json(writer, 400, {"error": "Missing behavior"})
+            return
 
-        # 提取 decision 对象（去掉 bridge 路由字段），透传给 hook
-        decision = {k: v for k, v in body.items() if k not in ("session_id", "id")}
-
-        logger.info(f"Web 审批决策: id={mid} decision={decision}")
+        logger.info(f"Web 审批决策: session={session_id[:8]}... decision={decision}")
 
         session = self._bridge._sessions.get(session_id)
-        if not session or not session.pending_request or session.pending_request.id != mid:
-            self._send_json(writer, 404, {"error": "Request not found"})
+        if not session or not session.pending_request:
+            self._send_json(writer, 404, {"error": "No pending request"})
             return
 
         session.pending_request.decision_future.set_result(decision)

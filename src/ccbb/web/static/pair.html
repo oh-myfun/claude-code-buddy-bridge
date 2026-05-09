@@ -109,10 +109,8 @@ function infoBlock(label, value, cls) {
 }
 
 function buildInfoHtml(msg) {
-  const ctx = msg.context || {};
-  const tool = msg.tool || ctx.tool_name || '?';
-  const input = ctx.tool_input;
-  const hint = msg.hint || '';
+  const tool = msg.tool_name || '?';
+  const input = msg.tool_input;
   const html = [];
 
   if (typeof input === 'object' && input) {
@@ -126,6 +124,19 @@ function buildInfoHtml(msg) {
     } else if (tool === 'Agent') {
       if (input.description) html.push(infoBlock('描述', input.description));
       if (input.prompt) html.push(infoBlock('提示', String(input.prompt).substring(0, 300)));
+    } else if (tool === 'AskUserQuestion') {
+      (input.questions || []).forEach(q => {
+        const header = q.header ? '[' + esc(q.header) + '] ' : '';
+        html.push(infoBlock(q.multiSelect ? '多选' : '单选', header + q.question));
+        const opts = (q.options || []).map((o, i) => {
+          const id = 'qopt_' + i;
+          const type = q.multiSelect ? 'checkbox' : 'radio';
+          let s = '<label style="display:block;padding:0.2em 0"><input type="' + type + '" name="qopt" value="' + esc(o.label) + '" data-qi="0"> ' + esc(o.label);
+          if (o.description) s += ' <span style="color:var(--pico-muted-color);font-size:0.9em">— ' + esc(o.description) + '</span>';
+          return s + '</label>';
+        });
+        html.push('<div class="req-section"><div class="req-value">' + opts.join('') + '</div></div>');
+      });
     } else {
       for (const k of ['command','file_path','url','path','pattern','query','prompt','description']) {
         if (typeof input[k] === 'string' && input[k]) {
@@ -135,7 +146,6 @@ function buildInfoHtml(msg) {
       }
     }
   }
-  if (html.length === 0 && hint) html.push(infoBlock('操作', hint));
   return html.join('');
 }
 
@@ -188,13 +198,14 @@ function openStream() {
 
   evtSource.addEventListener('request', e => {
     const msg = JSON.parse(e.data);
-    const ctx = msg.context || {};
-    currentId = msg.id;
-    window._currentSuggestions = ctx.permission_suggestions || [];
+    currentId = msg.tool_use_id;
+    window._currentSuggestions = msg.permission_suggestions || [];
+    window._currentTool = msg.tool_name || '';
+    window._currentQuestions = (msg.tool_input || {}).questions || null;
 
-    $('req-tool').textContent = msg.tool || ctx.tool_name || '?';
-    $('req-info').innerHTML = buildInfoHtml(msg) || infoBlock('操作', msg.hint || '');
-    $('req-context').textContent = JSON.stringify(ctx, null, 2);
+    $('req-tool').textContent = msg.tool_name || '?';
+    $('req-info').innerHTML = buildInfoHtml(msg) || infoBlock('操作', '');
+    $('req-context').textContent = JSON.stringify(msg, null, 2);
 
     if (window._currentSuggestions.length > 0) {
       $('req-suggestions').hidden = false;
@@ -232,25 +243,44 @@ function openStream() {
 }
 
 async function decide(behavior) {
-  const body = {session_id: sessionId, id: currentId, behavior};
-  const checks = document.querySelectorAll('#suggestions-list input[type=checkbox]:checked');
-  if (checks.length > 0 && window._currentSuggestions) {
-    const sel = [];
-    checks.forEach(cb => {
-      const si = parseInt(cb.dataset.si);
-      const ri = parseInt(cb.dataset.ri);
-      const sug = window._currentSuggestions[si];
-      if (!sug) return;
-      const rules = sug.rules || [];
-      if (sug.type === 'setMode') { sel.push(sug); }
-      else if (rules[ri]) {
-        sel.push({type: sug.type || 'addRules', rules: [rules[ri]], behavior: sug.behavior, destination: sug.destination});
+  const body = {behavior};
+  const tool = window._currentTool || '';
+
+  // AskUserQuestion: 收集选项构造 updatedInput
+  if (tool === 'AskUserQuestion' && window._currentQuestions) {
+    const answers = {};
+    const questions = window._currentQuestions;
+    questions.forEach(q => {
+      const checked = document.querySelectorAll('input[name="qopt"]:checked');
+      const labels = Array.from(checked).map(c => c.value);
+      if (q.multiSelect) {
+        answers[q.question] = labels;
+      } else if (labels.length > 0) {
+        answers[q.question] = labels[0];
       }
     });
-    if (sel.length > 0) body.updatedPermissions = sel;
+    body.updatedInput = {questions, answers};
+  } else {
+    // 非 AskUserQuestion: 检查记住规则
+    const checks = document.querySelectorAll('#suggestions-list input[type=checkbox]:checked');
+    if (checks.length > 0 && window._currentSuggestions) {
+      const sel = [];
+      checks.forEach(cb => {
+        const si = parseInt(cb.dataset.si);
+        const ri = parseInt(cb.dataset.ri);
+        const sug = window._currentSuggestions[si];
+        if (!sug) return;
+        const rules = sug.rules || [];
+        if (sug.type === 'setMode') { sel.push(sug); }
+        else if (rules[ri]) {
+          sel.push({type: sug.type || 'addRules', rules: [rules[ri]], behavior: sug.behavior, destination: sug.destination});
+        }
+      });
+      if (sel.length > 0) body.updatedPermissions = sel;
+    }
   }
   try {
-    await fetch('/api/decide', {
+    await fetch('/api/decide?session_id=' + encodeURIComponent(sessionId), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),

@@ -179,19 +179,11 @@ def _handle_session_end(event: dict) -> None:
 # ── PermissionRequest ──────────────────────────────────────────────────────
 
 def _handle_permission_request(event: dict) -> None:
-    """发送审批请求到配对设备"""
+    """发送审批请求到配对设备（透传原始事件）"""
     session_id = event.get("session_id", "")
-    tool_use_id = event.get("tool_use_id") or f"hook_{id(event)}"
-    tool_name = event.get("tool_name") or "?"
-    tool_input = event.get("tool_input")
-
-    req = {
-        "session_id": session_id,
-        "id": str(tool_use_id),
-        "tool": str(tool_name),
-        "hint": _make_hint(tool_input),
-        "context": event,
-    }
+    if not session_id:
+        _fail_open()
+        return
 
     s = _connect_to_bridge()
     if not s:
@@ -199,7 +191,7 @@ def _handle_permission_request(event: dict) -> None:
         return
 
     try:
-        payload = (json.dumps(req, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        payload = (json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
         resp = _send_request(s, payload)
 
         if resp and "behavior" in resp:

@@ -42,8 +42,24 @@ from typing import Optional, Set, Dict
 TCP_HOST_DEFAULT = "0.0.0.0"
 TCP_PORT_DEFAULT = 9876
 ENTRIES_MAX = 5
+HINT_MAX = 200
+_HINT_KEYS = ("command", "file_path", "url", "path", "pattern", "query", "prompt", "input")
 
 logger = logging.getLogger("ccbb.bridge")
+
+
+def _make_hint(tool_input: object) -> str:
+    """从 tool_input 中提取操作摘要"""
+    if not isinstance(tool_input, dict):
+        return str(tool_input)[:HINT_MAX]
+    for key in _HINT_KEYS:
+        val = tool_input.get(key)
+        if isinstance(val, str) and val:
+            return val[:HINT_MAX]
+    try:
+        return json.dumps(tool_input, separators=(",", ":"), ensure_ascii=False)[:HINT_MAX]
+    except Exception:
+        return str(tool_input)[:HINT_MAX]
 
 
 # ── 工具函数 ────────────────────────────────────────────────────────────────
@@ -172,7 +188,7 @@ class Bridge:
     async def _send_to_device(self, device: DeviceConnection, obj: dict) -> None:
         """发送消息到设备"""
         try:
-            payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+            payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
             device.writer.write(payload)
             await device.writer.drain()
         except Exception as e:
@@ -282,9 +298,9 @@ class Bridge:
             "session_id": session_id,
         })
 
-        # 如果有挂起的请求，发送快照给新设备
+        # 如果有挂起的请求，直接透传给新设备
         if session.pending_request:
-            await self._send_device_snapshot(device, session)
+            await self._send_to_device(device, session.pending_request.raw)
 
         logger.info(f"设备 {device.addr} 配对到 session {session_id[:8]}... "
                      f"(共 {len(session.paired_devices)} 个设备)")
@@ -343,76 +359,28 @@ class Bridge:
             logger.info(f"设备断开: {addr}")
 
     async def _process_device_message(self, device: DeviceConnection, msg: dict) -> None:
-        """处理单条设备消息"""
-        cmd = msg.get("cmd")
-        if cmd == "pair":
+        """处理单条设备消息：通过内容区分类型"""
+        if "behavior" in msg:
+            # CC 协议决策（透传）
+            if device.session_id:
+                await self._handle_permission_decision(device, msg)
+        elif msg.get("cmd") == "pair" or "pairing_code" in msg:
             pairing_code = msg.get("pairing_code")
             if pairing_code:
                 await self._handle_pairing_request(device, pairing_code)
-        elif cmd == "permission":
-            if device.session_id:
-                await self._handle_permission_decision(device, msg)
-            else:
-                await self._send_to_device(device, {
-                    "cmd": "error", "reason": "请先配对",
-                })
-        elif cmd == "hello":
+        elif msg.get("cmd") == "hello":
             pass
 
-    async def _handle_permission_decision(self, device: DeviceConnection, msg: dict) -> None:
+    async def _handle_permission_decision(self, device: DeviceConnection, decision: dict) -> None:
         """处理审批决策：透传给 hook"""
-        mid = msg.get("id")
-        if not mid:
-            logger.warning(f"无效的审批决策: {msg}")
-            return
-
-        # 提取 decision 对象（去掉 bridge 路由字段）
-        decision = {k: v for k, v in msg.items() if k not in ("cmd", "id")}
-
         session = self._sessions.get(device.session_id or "")
-        if session and session.pending_request and session.pending_request.id == mid:
-            session.pending_request.decision_future.set_result(decision)
-            session.pending_request = None
-            logger.info(f"收到决策 id={mid} decision={decision}")
-        else:
-            logger.warning(f"收到孤立 permission id={mid!r}")
+        if not session or not session.pending_request:
+            logger.warning(f"收到孤立决策: {decision}")
             return
 
-        try:
-            await self._send_to_device(device, {
-                "ack": "permission", "ok": True, "n": 0,
-            })
-        except Exception as e:
-            logger.warning("permission ack 发送失败: %s", e)
-
-    # ── 快照 ────────────────────────────────────────────────────────────────
-
-    async def _send_device_snapshot(self, device: DeviceConnection, session: Session) -> None:
-        """发送快照给设备（透传原始请求）"""
-        if session.pending_request:
-            raw = session.pending_request.raw
-            snapshot = {
-                "total": 1, "running": 0, "waiting": 1,
-                "msg": truncate(f"approve: {raw.get('tool', '?')}"),
-                "entries": list(reversed(session.entries[:ENTRIES_MAX])),
-                "tokens": 0, "tokens_today": 0,
-                "prompt": {
-                    "id": session.pending_request.id,
-                    "tool": truncate(raw.get("tool", "?")),
-                    "hint": truncate(raw.get("hint", "")),
-                },
-                "context": raw.get("context"),
-                "tool_input": (raw.get("context") or {}).get("tool_input"),
-                "suggestions": (raw.get("context") or {}).get("permission_suggestions"),
-            }
-        else:
-            snapshot = {
-                "total": 0, "running": 0, "waiting": 0,
-                "msg": "", "entries": list(reversed(session.entries[:ENTRIES_MAX])),
-                "tokens": 0, "tokens_today": 0,
-            }
-
-        await self._send_to_device(device, snapshot)
+        session.pending_request.decision_future.set_result(decision)
+        session.pending_request = None
+        logger.info(f"收到决策: {decision}")
 
     # ── Hook 连接处理 ───────────────────────────────────────────────────────
 
@@ -446,10 +414,10 @@ class Bridge:
             except Exception:
                 pass
 
-    async def _process_permission_request(self, msg: dict, writer: asyncio.StreamWriter,
+    async def _process_permission_request(self, event: dict, writer: asyncio.StreamWriter,
                                            reader: asyncio.StreamReader) -> None:
         """处理审批请求：广播给所有订阅者，等待设备响应或 hook 断开，再广播结果"""
-        session_id = msg.get("session_id", "")
+        session_id = event.get("session_id", "")
         if not session_id:
             logger.warning("PermissionRequest 缺少 session_id")
             return
@@ -459,29 +427,29 @@ class Bridge:
             logger.warning(f"未知 session: {session_id[:8]}...")
             return
 
-        rid = str(msg.get("id") or f"req_{int(time.time() * 1000)}")
+        rid = str(event.get("tool_use_id") or f"req_{int(time.time() * 1000)}")
         logger.info(f"收到请求 session={session_id[:8]}... id={rid}")
 
-        # 创建待处理请求（透传原始数据）
+        # 创建待处理请求（透传原始 CC 事件）
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        session.pending_request = PendingRequest(id=rid, decision_future=fut, raw=msg)
+        session.pending_request = PendingRequest(id=rid, decision_future=fut, raw=event)
 
-        tool = msg.get("tool") or "?"
-        hint = msg.get("hint") or ""
-        session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool}: {hint}', 50)}")
+        tool_name = event.get("tool_name") or "?"
+        hint = _make_hint(event.get("tool_input"))
+        session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool_name}: {hint}', 50)}")
         session.entries = session.entries[:ENTRIES_MAX]
 
-        # 广播审批请求到所有订阅者（透传）
+        # 广播审批请求到所有订阅者（透传原始事件）
         for dev in list(session.paired_devices):
             try:
-                await self._send_device_snapshot(dev, session)
+                await self._send_to_device(dev, event)
             except Exception as e:
-                logger.warning(f"发送快照到 {dev.addr} 失败: {e}")
+                logger.warning(f"发送请求到 {dev.addr} 失败: {e}")
 
         for q in list(session.web_queues):
             try:
-                q.put_nowait({"type": "request", "data": msg})
+                q.put_nowait({"type": "request", "data": event})
             except Exception:
                 pass
 
@@ -516,11 +484,7 @@ class Bridge:
         behavior = result.get("behavior", "closed") if isinstance(result, dict) else (result or "closed")
         for dev in list(session.paired_devices):
             try:
-                await self._send_to_device(dev, {
-                    "cmd": "permission_done",
-                    "id": rid,
-                    "decision": behavior,
-                })
+                await self._send_to_device(dev, {"done": behavior})
             except Exception:
                 pass
         for q in list(session.web_queues):
@@ -540,8 +504,9 @@ class Bridge:
 
     def _is_hook_request(self, msg: dict) -> bool:
         return (
-            "tool" in msg
+            msg.get("hook_event_name") is not None
             or msg.get("action") in ("session_start", "session_end", "get_pairing_code")
+            or "tool_name" in msg
             or "session_id" in msg
         )
 
@@ -585,12 +550,12 @@ class Bridge:
             writer.close()
             return
 
-        if self._is_hook_request(msg):
-            logger.info(f"[{addr}] 识别为 Hook 连接")
-            await self._handle_hook(reader, writer, first_msg=msg)
-        elif self._is_device_message(msg):
+        if self._is_device_message(msg):
             logger.info(f"[{addr}] 识别为设备连接")
             await self._handle_device(reader, writer, first_msg=msg)
+        elif self._is_hook_request(msg):
+            logger.info(f"[{addr}] 识别为 Hook 连接")
+            await self._handle_hook(reader, writer, first_msg=msg)
         else:
             logger.warning(f"[{addr}] 无法识别的消息格式: {msg}")
             writer.close()

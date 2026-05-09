@@ -83,7 +83,8 @@ def test_bridge_initial_state():
 
 def test_is_hook_request():
     bridge = Bridge()
-    assert bridge._is_hook_request({"tool": "Bash"})
+    assert bridge._is_hook_request({"hook_event_name": "PermissionRequest"})
+    assert bridge._is_hook_request({"tool_name": "Bash"})
     assert bridge._is_hook_request({"action": "session_start"})
     assert bridge._is_hook_request({"action": "session_end"})
     assert bridge._is_hook_request({"session_id": "abc123"})
@@ -96,7 +97,7 @@ def test_is_device_message():
     assert bridge._is_device_message({"cmd": "pair"})
     assert bridge._is_device_message({"cmd": "permission"})
     assert bridge._is_device_message({"cmd": "hello"})
-    assert not bridge._is_device_message({"tool": "Bash"})
+    assert not bridge._is_device_message({"tool_name": "Bash"})
     assert not bridge._is_device_message({"session_id": "abc"})
 
 
@@ -322,49 +323,45 @@ class TestSuggestions:
         fut = loop.create_future()
         req = PendingRequest(
             id="test-id", decision_future=fut,
-            raw={"id": "test-id", "tool": "Bash", "hint": "ls",
-                 "context": {"permission_suggestions": [{"rules": [{"behavior": "allow"}]}]}},
+            raw={"tool_name": "Bash", "tool_input": {"command": "ls"},
+                 "permission_suggestions": [{"rules": [{"behavior": "allow"}]}]},
         )
-        ctx = req.raw.get("context", {})
-        assert ctx.get("permission_suggestions") is not None
+        assert req.raw.get("permission_suggestions") is not None
         loop.close()
 
-    def test_snapshot_includes_suggestions(self, bridge, mock_writer):
+    def test_request_forwarded_to_device(self, bridge, mock_writer):
+        """验证审批请求直接透传原始事件给设备"""
         async def run_test():
-            await bridge._register_session("session-sug", mock_writer)
-            session = bridge._sessions["session-sug"]
+            await bridge._register_session("session-fwd", mock_writer)
+            session = bridge._sessions["session-fwd"]
 
-            # 配对设备
             device = DeviceConnection(
                 reader=MagicMock(), writer=mock_writer,
-                addr=("127.0.0.1", 12345), uid="dev-sug",
+                addr=("127.0.0.1", 12345), uid="dev-fwd",
             )
             session.paired_devices.add(device)
-            device.session_id = "session-sug"
+            device.session_id = "session-fwd"
 
-            # 创建有 suggestions 的 pending request
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
-            session.pending_request = PendingRequest(
-                id="req-1", decision_future=fut,
-                raw={"id": "req-1", "tool": "Bash", "hint": "rm -rf /",
-                     "context": {"tool_input": {"command": "rm -rf /"},
-                                 "permission_suggestions": [{"rules": [{"behavior": "allow", "toolName": "Bash"}]}]}},
-            )
+            event = {"tool_name": "Bash", "tool_input": {"command": "ls"},
+                     "permission_suggestions": [{"rules": [{"behavior": "allow", "toolName": "Bash"}]}]}
+            session.pending_request = PendingRequest(id="req-1", decision_future=fut, raw=event)
 
-            await bridge._send_device_snapshot(device, session)
+            # 透传原始事件
+            await bridge._send_to_device(device, event)
 
-            # 验证发送的消息包含 suggestions
+            import json
             calls = mock_writer.write.call_args_list
             last_payload = calls[-1][0][0]
-            import json
             msg = json.loads(last_payload.decode())
-            assert "suggestions" in msg
-            assert len(msg["suggestions"]) == 1
+            assert msg["tool_name"] == "Bash"
+            assert msg["permission_suggestions"] is not None
 
         asyncio.run(run_test())
 
-    def test_permission_decision_with_updated_permissions(self, bridge, mock_writer):
+    def test_permission_decision_transparent(self, bridge, mock_writer):
+        """验证设备决策直接透传（无 cmd/id 包装）"""
         async def run_test():
             await bridge._register_session("session-up", mock_writer)
             session = bridge._sessions["session-up"]
@@ -380,14 +377,12 @@ class TestSuggestions:
             fut = loop.create_future()
             session.pending_request = PendingRequest(
                 id="req-up", decision_future=fut,
-                raw={"id": "req-up", "tool": "Bash", "hint": "ls", "context": {}},
+                raw={"tool_name": "Bash", "tool_input": {"command": "ls"}},
             )
 
-            # 发送带 updatedPermissions 的决策（CC 协议格式）
+            # 设备直接发送 CC decision 格式
             updated_perms = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls"}], "behavior": "allow", "destination": "localSettings"}]
             await bridge._handle_permission_decision(device, {
-                "cmd": "permission",
-                "id": "req-up",
                 "behavior": "allow",
                 "updatedPermissions": updated_perms,
             })
@@ -396,7 +391,6 @@ class TestSuggestions:
             assert isinstance(result, dict)
             assert result["behavior"] == "allow"
             assert result["updatedPermissions"] == updated_perms
-            assert "cmd" not in result  # 路由字段已剥离
-            assert "id" not in result
+            # decision 就是设备发送的原始数据，bridge 不添加也不剥离
 
         asyncio.run(run_test())

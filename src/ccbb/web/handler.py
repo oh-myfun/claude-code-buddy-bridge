@@ -68,6 +68,8 @@ class WebHandler:
 
             if req.method == "GET" and req.path == "/pair":
                 await self._serve_static(writer, "pair.html", "text/html; charset=utf-8")
+            elif req.method == "GET" and req.path.startswith("/static/"):
+                await self._serve_static_path(writer, req.path)
             elif req.method == "POST" and req.path == "/api/pair":
                 await self._api_pair(writer, req)
             elif req.method == "GET" and req.path == "/api/stream":
@@ -94,6 +96,33 @@ class WebHandler:
                             content_type: str) -> None:
         static_dir = os.path.join(os.path.dirname(__file__), "static")
         filepath = os.path.join(static_dir, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            self._send_response(writer, 200, content, content_type)
+        except FileNotFoundError:
+            self._send_response(writer, 404, "Not Found")
+
+    _MIME_TYPES = {
+        ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".png": "image/png",
+        ".svg": "image/svg+xml; charset=utf-8",
+    }
+
+    async def _serve_static_path(self, writer: asyncio.StreamWriter,
+                                 url_path: str) -> None:
+        static_dir = os.path.join(os.path.dirname(__file__), "static")
+        # URL: /static/buddies/cat.js → rel: buddies/cat.js
+        rel = os.path.normpath(url_path[len("/static/"):])
+        if rel.startswith("..") or os.path.isabs(rel):
+            self._send_response(writer, 403, "Forbidden")
+            return
+        filepath = os.path.join(static_dir, rel)
+        _, ext = os.path.splitext(filepath)
+        content_type = self._MIME_TYPES.get(ext, "application/octet-stream")
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()

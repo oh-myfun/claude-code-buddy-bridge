@@ -44,6 +44,16 @@
     <p id="status-text">正在配对…</p>
   </hgroup>
 
+  <div id="buddy-box" style="text-align:center;margin:0.5rem 0">
+    <div id="buddy-stage" style="background:#000;display:inline-block;padding:0.5rem 1rem;border-radius:8px">
+      <pre id="buddy-sprite" style="margin:0;font-family:'Courier New',monospace;font-size:1em;line-height:1.2"></pre>
+    </div>
+    <div style="margin-top:0.3rem;font-size:0.75em;color:var(--pico-muted-color)">
+      <span id="buddy-species">capybara</span>
+      <button id="buddy-switch" style="margin-left:0.5em;font-size:0.9em;padding:0.1em 0.5em">切换</button>
+    </div>
+  </div>
+
   <!-- 配对中 -->
   <article id="view-pairing" class="card">
     <div class="status">
@@ -82,6 +92,25 @@
   </article>
 </main>
 
+<script src="/static/buddies/cat.js"></script>
+<script src="/static/buddies/capybara.js"></script>
+<script src="/static/buddies/duck.js"></script>
+<script src="/static/buddies/goose.js"></script>
+<script src="/static/buddies/blob.js"></script>
+<script src="/static/buddies/dragon.js"></script>
+<script src="/static/buddies/octopus.js"></script>
+<script src="/static/buddies/owl.js"></script>
+<script src="/static/buddies/penguin.js"></script>
+<script src="/static/buddies/turtle.js"></script>
+<script src="/static/buddies/snail.js"></script>
+<script src="/static/buddies/ghost.js"></script>
+<script src="/static/buddies/axolotl.js"></script>
+<script src="/static/buddies/cactus.js"></script>
+<script src="/static/buddies/robot.js"></script>
+<script src="/static/buddies/rabbit.js"></script>
+<script src="/static/buddies/mushroom.js"></script>
+<script src="/static/buddies/chonk.js"></script>
+<script src="/static/buddy.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
 const code = params.get('code') || '';
@@ -186,6 +215,8 @@ async function pair() {
     sessionId = data.session_id;
     $('status-text').textContent = '已配对';
     showView('waiting');
+    buddy.setBaseState('idle');
+    buddy.setState('idle');
     openStream();
   } catch (e) {
     $('status-text').textContent = '连接失败: ' + e.message;
@@ -216,12 +247,14 @@ function openStream() {
 
     $('status-text').textContent = '收到审批请求';
     showView('request');
+    buddy.setState('attention', {duration:3000, revertTo:'busy'});
   });
 
   const labels = {allow: '允许', deny: '拒绝', closed: '已在其他设备完成'};
   evtSource.addEventListener('done', e => {
     const data = JSON.parse(e.data);
     $('done-text').textContent = '审批已完成: ' + (labels[data.decision] || data.decision);
+    buddy.setState('dizzy', {duration:2000, revertTo: buddy.baseState});
     $('status-text').textContent = '等待下一个请求…';
     showView('done');
     setTimeout(() => showView('waiting'), 2000);
@@ -230,6 +263,7 @@ function openStream() {
   evtSource.addEventListener('session_end', () => {
     $('done-text').textContent = '会话已结束';
     $('status-text').textContent = '会话已结束';
+    buddy.setState('sleep');
     showView('done');
     evtSource.close();
   });
@@ -237,6 +271,8 @@ function openStream() {
   evtSource.onopen = () => {
     $('status-text').textContent = '已配对，等待审批请求…';
     showView('waiting');
+    buddy.setBaseState('idle');
+    buddy.setState('idle');
   };
 
   evtSource.onerror = () => {};
@@ -287,11 +323,23 @@ async function decide(behavior) {
     });
     $('status-text').textContent = '已发送，等待下一个请求…';
     showView('waiting');
+    if (behavior === 'allow') {
+      buddy.setState('heart', {duration:2000, revertTo:'celebrate'});
+      setTimeout(() => buddy.setState('celebrate', {duration:2000, revertTo: buddy.baseState}), 2000);
+    } else {
+      buddy.setState('dizzy', {duration:2000, revertTo: buddy.baseState});
+    }
   } catch (e) {
     $('status-text').textContent = '发送失败: ' + e.message;
   }
 }
 
+$('buddy-switch').onclick = () => {
+  buddy.species = randomSpecies(buddy.species);
+  $('buddy-species').textContent = buddy.species;
+};
+
+buddy.start();
 pair();
 </script>
 </body>

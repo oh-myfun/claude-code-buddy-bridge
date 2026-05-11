@@ -465,6 +465,8 @@ class Bridge:
             await self._broadcast(session, "request", {**event, "ccbb_request_id": rid})
 
         # 等待：设备响应 或 hook 断开（超时由 Claude Code 管理）
+        # 安全网超时：略大于 CC hook timeout (120s) + 余量
+        BRIDGE_REQUEST_TIMEOUT = 125
         hook_disconnected = False
 
         async def _watch_hook():
@@ -478,12 +480,18 @@ class Bridge:
         fut_task = asyncio.ensure_future(fut)
         done, pending = await asyncio.wait(
             [fut_task, reader_task],
+            timeout=BRIDGE_REQUEST_TIMEOUT,
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
             t.cancel()
 
-        if fut_task in done:
+        if not done:
+            # 超时安全网：hook 未断开且设备未响应
+            result = "timeout"
+            hook_disconnected = True
+            logger.warning(f"[审批] id={rid} 超时 ({BRIDGE_REQUEST_TIMEOUT}s)")
+        elif fut_task in done:
             result = fut_task.result()
         else:
             result = "closed"

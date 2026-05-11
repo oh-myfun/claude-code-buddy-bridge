@@ -16,8 +16,8 @@ from ccbb.bridge import (
 
 def test_derive_pairing_code():
     code = derive_pairing_code("abc12345-def6-7890")
-    assert code == "ABC123"
-    assert len(code) == 6
+    assert code == "ABC12345"
+    assert len(code) == 8
 
 
 def test_derive_pairing_code_deterministic():
@@ -109,8 +109,8 @@ class TestBridgeSession:
 
         assert "a1b2c3d4-session-abc" in bridge._sessions
         session = bridge._sessions["a1b2c3d4-session-abc"]
-        assert len(session.pairing_code) == 6
-        assert session.pairing_code == "A1B2C3"
+        assert len(session.pairing_code) == 8
+        assert session.pairing_code == "A1B2C3D4"
         assert bridge._pairing_index[session.pairing_code] == "a1b2c3d4-session-abc"
 
     def test_register_session_duplicate(self, bridge, mock_writer):
@@ -167,7 +167,7 @@ class TestBridgeSession:
     def test_pairing_code_uniqueness(self, bridge, mock_writer):
         async def run_test():
             for i in range(10):
-                await bridge._register_session(f"{i:06x}-session", mock_writer)
+                await bridge._register_session(f"{i:08x}-session", mock_writer)
 
         asyncio.run(run_test())
 

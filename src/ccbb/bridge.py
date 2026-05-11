@@ -47,8 +47,8 @@ logger = logging.getLogger("ccbb.bridge")
 
 
 def derive_pairing_code(session_id: str) -> str:
-    """从 session_id 前 6 位派生配对码，同一会话始终相同"""
-    return session_id[:6].upper()
+    """从 session_id 前 8 位派生配对码，同一会话始终相同"""
+    return session_id[:8].upper()
 
 
 # ── 数据结构 ────────────────────────────────────────────────────────────────

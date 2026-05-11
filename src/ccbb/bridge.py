@@ -355,7 +355,7 @@ class Bridge:
             logger.error(f"[设备] {addr} 异常: {e}")
         finally:
             self._remove_device(device)
-            logger.info(f"[设备] {addr} 断开")
+            logger.info(f"[设备] 断开 {addr}")
 
     async def _process_device_message(self, device: DeviceConnection, msg: dict) -> None:
         """处理单条设备消息：统一 {type, data} 格式"""
@@ -558,7 +558,6 @@ class Bridge:
     ) -> None:
         """处理客户端连接：通过首条消息识别类型并分发"""
         addr = writer.get_extra_info("peername")
-        logger.info(f"[连接] 新连接 {addr}")
 
         try:
             first_line = await asyncio.wait_for(reader.readline(), timeout=60.0)
@@ -575,7 +574,7 @@ class Bridge:
 
         # HTTP 协议检测
         if first_str.startswith(("GET ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "HEAD ")):
-            logger.info(f"[Web] {addr} HTTP 连接")
+            logger.info(f"[Web] 连接 {addr}")
             from ccbb.web.handler import WebHandler
             handler = WebHandler(self)
             await handler.handle(reader, writer, first_str)
@@ -589,7 +588,7 @@ class Bridge:
             return
 
         if self._is_device_message(msg):
-            logger.info(f"[设备] {addr} TCP 连接")
+            logger.info(f"[设备] 连接 {addr}")
             await self._handle_device(reader, writer, first_msg=msg)
         elif self._is_hook_request(msg):
             logger.info(f"[Hook] {addr} 连接 action={msg.get('action', 'PermissionRequest')}")

@@ -167,7 +167,7 @@ class WebHandler:
             return
 
         sid_short = session_id[:8]
-        logger.info(f"[Web] SSE 连接 session={sid_short}...")
+        logger.info(f"[Web] 连接 session={sid_short}...")
 
         queue: asyncio.Queue = asyncio.Queue()
         session.web_queues.append(queue)
@@ -206,7 +206,7 @@ class WebHandler:
         finally:
             if queue in session.web_queues:
                 session.web_queues.remove(queue)
-            logger.info(f"[Web] SSE 断开 session={sid_short}...")
+            logger.info(f"[Web] 断开 session={sid_short}...")
 
     # ── API: 审批决策 ───────────────────────────────────────────────────────
 

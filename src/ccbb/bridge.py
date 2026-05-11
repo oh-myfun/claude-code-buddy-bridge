@@ -31,6 +31,7 @@ import logging
 import os
 import random
 import signal
+import socket
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
@@ -347,9 +348,26 @@ class Bridge:
 
     # ── Hook 连接处理 ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _set_keepalive(writer: asyncio.StreamWriter, idle: int = 5, interval: int = 3) -> None:
+        """设置 TCP keepalive，快速检测对端断开"""
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval)
+            elif hasattr(socket, "SIO_KEEPALIVE_VALS"):
+                sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, idle * 1000, interval * 1000))
+        except (OSError, AttributeError):
+            pass
+
     async def _handle_hook(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                            first_msg: dict) -> None:
         """处理 Hook 连接"""
+        self._set_keepalive(writer)
         session_id = ""
         try:
             action = first_msg.get("action")

@@ -154,7 +154,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 break
             elif not state.paired:
                 if len(cmd) == 6 and cmd.isdigit():
-                    resp = {"cmd": "pair", "pairing_code": cmd}
+                    resp = {"type": "pair", "data": {"pairing_code": cmd}}
                     print(f"[设备] 发送配对请求: {resp}")
                     writer.write((json.dumps(resp) + "\n").encode())
                     await writer.drain()
@@ -169,8 +169,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 tid = state.pending_event.get("tool_use_id")
                 if tid:
                     decision["ccbb_request_id"] = tid
-                print(f"[设备] 发送允许: {decision}")
-                writer.write((json.dumps(decision) + "\n").encode())
+                msg = {"type": "decision", "data": decision}
+                print(f"[设备] 发送允许: {msg}")
+                writer.write((json.dumps(msg) + "\n").encode())
                 await writer.drain()
                 state.pending_event = None
             elif cmd.lower() == 'r' and state.pending_event:
@@ -181,8 +182,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                     tid = state.pending_event.get("tool_use_id")
                     if tid:
                         decision["ccbb_request_id"] = tid
-                    print(f"[设备] 发送允许并记住全部规则: {decision}")
-                    writer.write((json.dumps(decision) + "\n").encode())
+                    msg = {"type": "decision", "data": decision}
+                    print(f"[设备] 发送允许并记住全部规则: {msg}")
+                    writer.write((json.dumps(msg) + "\n").encode())
                     await writer.drain()
                     state.pending_event = None
                 else:
@@ -222,9 +224,10 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                         tid = state.pending_event.get("tool_use_id")
                         if tid:
                             decision["ccbb_request_id"] = tid
+                        msg = {"type": "decision", "data": decision}
                         print(f"[设备] 选择: {', '.join(selected_labels)}")
-                        print(f"[设备] 发送回答: {decision}")
-                        writer.write((json.dumps(decision) + "\n").encode())
+                        print(f"[设备] 发送回答: {msg}")
+                        writer.write((json.dumps(msg) + "\n").encode())
                         await writer.drain()
                         state.pending_event = None
                     else:
@@ -263,8 +266,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                         tid = state.pending_event.get("tool_use_id")
                         if tid:
                             decision["ccbb_request_id"] = tid
-                        print(f"[设备] 发送允许并记住规则: {decision}")
-                        writer.write((json.dumps(decision) + "\n").encode())
+                        msg = {"type": "decision", "data": decision}
+                        print(f"[设备] 发送允许并记住规则: {msg}")
+                        writer.write((json.dumps(msg) + "\n").encode())
                         await writer.drain()
                         state.pending_event = None
                 except (ValueError, IndexError):
@@ -279,8 +283,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 tid = state.pending_event.get("tool_use_id")
                 if tid:
                     decision["ccbb_request_id"] = tid
-                print(f"[设备] 发送拒绝: {decision}")
-                writer.write((json.dumps(decision) + "\n").encode())
+                msg = {"type": "decision", "data": decision}
+                print(f"[设备] 发送拒绝: {msg}")
+                writer.write((json.dumps(msg) + "\n").encode())
                 await writer.drain()
                 state.pending_event = None
             elif state.pending_event:
@@ -309,7 +314,7 @@ async def main():
     print("[设备] 已连接到服务端")
 
     # 发送 hello 消息用于连接识别
-    writer.write((json.dumps({"cmd": "hello"}) + "\n").encode())
+    writer.write((json.dumps({"type": "hello", "data": {}}) + "\n").encode())
     await writer.drain()
 
     state = DeviceState()

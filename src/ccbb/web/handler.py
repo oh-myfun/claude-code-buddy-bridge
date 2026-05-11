@@ -139,7 +139,8 @@ class WebHandler:
             self._send_json(writer, 400, {"error": "Invalid JSON"})
             return
 
-        code = body.get("code", "")
+        payload = body.get("data", body)
+        code = payload.get("pairing_code") or payload.get("code") or ""
         session_id = self._bridge._pairing_index.get(code)
         if not session_id:
             self._send_json(writer, 404, {"error": "Invalid pairing code"})
@@ -212,11 +213,12 @@ class WebHandler:
             return
 
         try:
-            decision = json.loads(req.body.decode("utf-8"))
+            body = json.loads(req.body.decode("utf-8"))
         except Exception:
             self._send_json(writer, 400, {"error": "Invalid JSON"})
             return
 
+        decision = body.get("data", body)
         if "behavior" not in decision:
             self._send_json(writer, 400, {"error": "Missing behavior"})
             return

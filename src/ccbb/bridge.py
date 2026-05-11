@@ -359,16 +359,17 @@ class Bridge:
             logger.info(f"设备断开: {addr}")
 
     async def _process_device_message(self, device: DeviceConnection, msg: dict) -> None:
-        """处理单条设备消息：通过内容区分类型"""
-        if "behavior" in msg:
-            # CC 协议决策（透传）
+        """处理单条设备消息：统一 {type, data} 格式"""
+        msg_type = msg.get("type")
+        data = msg.get("data", {})
+        if msg_type == "decision":
             if device.session_id:
-                await self._handle_permission_decision(device, msg)
-        elif msg.get("cmd") == "pair" or "pairing_code" in msg:
-            pairing_code = msg.get("pairing_code")
+                await self._handle_permission_decision(device, data)
+        elif msg_type == "pair":
+            pairing_code = data.get("pairing_code")
             if pairing_code:
                 await self._handle_pairing_request(device, pairing_code)
-        elif msg.get("cmd") == "hello":
+        elif msg_type == "hello":
             pass
 
     def _resolve_decision(self, session_id: str, decision: dict) -> Optional[str]:

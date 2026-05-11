@@ -175,7 +175,7 @@ async def main():
             continue
 
         rid = req_msg.get("data", {}).get("tool_use_id")
-        decision = {"behavior": "allow", "ccbb_request_id": rid}
+        decision = {"type": "decision", "data": {"behavior": "allow", "ccbb_request_id": rid}}
         print(f"  审批 {rid}: {decision}")
         dev_writer.write((json.dumps(decision) + "\n").encode())
         await dev_writer.drain()

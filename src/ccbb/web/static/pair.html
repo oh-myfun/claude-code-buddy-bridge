@@ -212,7 +212,7 @@ async function pair() {
     const resp = await fetch('/api/pair', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({code}),
+      body: JSON.stringify({type: "pair", data: {pairing_code: code}}),
     });
     const data = await resp.json();
     if (!resp.ok) { $('status-text').textContent = data.error || '配对失败'; return; }
@@ -307,7 +307,7 @@ function openStream() {
 }
 
 async function decide(behavior) {
-  const body = {behavior, request_id: currentId};
+  const decision = {behavior, request_id: currentId};
   const tool = window._currentTool || '';
 
   // AskUserQuestion: 收集选项构造 updatedInput
@@ -323,7 +323,7 @@ async function decide(behavior) {
         answers[q.question] = labels[0];
       }
     });
-    body.updatedInput = {questions, answers};
+    decision.updatedInput = {questions, answers};
   } else {
     // 非 AskUserQuestion: 检查记住规则
     const checks = document.querySelectorAll('#suggestions-list input[type=checkbox]:checked');
@@ -340,14 +340,14 @@ async function decide(behavior) {
           sel.push({type: sug.type || 'addRules', rules: [rules[ri]], behavior: sug.behavior, destination: sug.destination});
         }
       });
-      if (sel.length > 0) body.updatedPermissions = sel;
+      if (sel.length > 0) decision.updatedPermissions = sel;
     }
   }
   try {
     await fetch('/api/decide?session_id=' + encodeURIComponent(sessionId), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
+      body: JSON.stringify({type: "decision", data: decision}),
     });
     // 不切换视图/动画 — SSE 的 done 事件统一驱动
   } catch (e) {

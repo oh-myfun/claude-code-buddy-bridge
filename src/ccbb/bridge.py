@@ -213,7 +213,7 @@ class Bridge:
 
     async def _handle_pairing_request(self, device: DeviceConnection, pairing_code: str) -> bool:
         """处理设备的配对请求"""
-        session_id = self._pairing_index.get(pairing_code)
+        session_id = self._pairing_index.get(pairing_code.upper())
         if session_id is None:
             await self._send_to_device(device, {
                 "type": "pairing_failed", "data": {"reason": "配对码无效或已过期"},

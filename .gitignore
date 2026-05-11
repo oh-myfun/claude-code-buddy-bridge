@@ -10,3 +10,5 @@ dist/
 *.log
 /tmp/cdbb.sock
 uv.lock
+.claude/
+.superpowers/

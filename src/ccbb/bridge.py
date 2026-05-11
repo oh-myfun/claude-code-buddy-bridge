@@ -29,7 +29,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import signal
 import socket
 import unicodedata
@@ -47,9 +46,9 @@ logger = logging.getLogger("ccbb.bridge")
 # ── 工具函数 ────────────────────────────────────────────────────────────────
 
 
-def generate_pairing_code() -> str:
-    """生成随机6位配对码"""
-    return str(random.randint(100000, 999999))
+def derive_pairing_code(session_id: str) -> str:
+    """从 session_id 前 6 位派生配对码，同一会话始终相同"""
+    return session_id[:6].upper()
 
 
 # ── 数据结构 ────────────────────────────────────────────────────────────────
@@ -158,9 +157,7 @@ class Bridge:
             logger.info(f"[Session] 恢复 {session_id[:8]}... 配对码={session.pairing_code}")
             return
 
-        code = generate_pairing_code()
-        while code in self._pairing_index:
-            code = generate_pairing_code()
+        code = derive_pairing_code(session_id)
 
         session = Session(session_id=session_id, pairing_code=code)
         self._sessions[session_id] = session
@@ -415,9 +412,7 @@ class Bridge:
         session = self._sessions.get(session_id)
         if session is None:
             # daemon 重启后 session 丢失，自动恢复注册
-            code = generate_pairing_code()
-            while code in self._pairing_index:
-                code = generate_pairing_code()
+            code = derive_pairing_code(session_id)
             session = Session(session_id=session_id, pairing_code=code)
             self._sessions[session_id] = session
             self._pairing_index[code] = session_id

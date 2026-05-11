@@ -153,7 +153,7 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 print("[设备] 退出…")
                 break
             elif not state.paired:
-                if len(cmd) == 6 and cmd.isdigit():
+                if len(cmd) == 6:
                     resp = {"type": "pair", "data": {"pairing_code": cmd}}
                     print(f"[设备] 发送配对请求: {resp}")
                     writer.write((json.dumps(resp) + "\n").encode())

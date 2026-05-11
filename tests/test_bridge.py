@@ -8,22 +8,27 @@ import pytest
 from ccbb.bridge import (
     Bridge,
     Session,
-    generate_pairing_code,
+    derive_pairing_code,
     DeviceConnection,
     PendingRequest,
 )
 
 
-def test_generate_pairing_code():
-    code = generate_pairing_code()
+def test_derive_pairing_code():
+    code = derive_pairing_code("abc12345-def6-7890")
+    assert code == "ABC123"
     assert len(code) == 6
-    assert code.isdigit()
-    assert 100000 <= int(code) <= 999999
 
 
-def test_generate_pairing_code_unique():
-    codes = [generate_pairing_code() for _ in range(100)]
-    assert len(set(codes)) > 90
+def test_derive_pairing_code_deterministic():
+    sid = "a1b2c3d4-e5f6-7890"
+    assert derive_pairing_code(sid) == derive_pairing_code(sid)
+
+
+def test_derive_pairing_code_different_sessions():
+    code1 = derive_pairing_code("aaa11111-0000-0000")
+    code2 = derive_pairing_code("bbb22222-0000-0000")
+    assert code1 != code2
 
 
 def test_session_creation():
@@ -98,49 +103,45 @@ class TestBridgeSession:
 
     def test_register_session(self, bridge, mock_writer):
         async def run_test():
-            await bridge._register_session("session-abc", mock_writer)
+            await bridge._register_session("a1b2c3d4-session-abc", mock_writer)
 
         asyncio.run(run_test())
 
-        assert "session-abc" in bridge._sessions
-        session = bridge._sessions["session-abc"]
+        assert "a1b2c3d4-session-abc" in bridge._sessions
+        session = bridge._sessions["a1b2c3d4-session-abc"]
         assert len(session.pairing_code) == 6
-        assert session.pairing_code.isdigit()
-        assert bridge._pairing_index[session.pairing_code] == "session-abc"
+        assert session.pairing_code == "A1B2C3"
+        assert bridge._pairing_index[session.pairing_code] == "a1b2c3d4-session-abc"
 
     def test_register_session_duplicate(self, bridge, mock_writer):
         async def run_test():
-            await bridge._register_session("session-abc", mock_writer)
-            await bridge._register_session("session-abc", mock_writer)
+            await bridge._register_session("a1b2c3d4-session-abc", mock_writer)
+            await bridge._register_session("a1b2c3d4-session-abc", mock_writer)
 
         asyncio.run(run_test())
 
         assert len(bridge._sessions) == 1
-        code = bridge._sessions["session-abc"].pairing_code
-        # 同一个 session_id 应该返回相同配对码
-        assert bridge._pairing_index[code] == "session-abc"
+        code = bridge._sessions["a1b2c3d4-session-abc"].pairing_code
+        assert bridge._pairing_index[code] == "a1b2c3d4-session-abc"
 
     def test_unregister_session(self, bridge, mock_writer):
-        # 先注册
         async def setup():
-            await bridge._register_session("session-xyz", mock_writer)
+            await bridge._register_session("x9y8z7w6-session-xyz", mock_writer)
         asyncio.run(setup())
 
-        session = bridge._sessions["session-xyz"]
+        session = bridge._sessions["x9y8z7w6-session-xyz"]
         code = session.pairing_code
 
-        # 注销
-        bridge._unregister_session("session-xyz")
+        bridge._unregister_session("x9y8z7w6-session-xyz")
 
-        assert "session-xyz" not in bridge._sessions
+        assert "x9y8z7w6-session-xyz" not in bridge._sessions
         assert code not in bridge._pairing_index
 
     def test_unregister_session_notifies_devices(self, bridge, mock_writer):
         async def run_test():
-            await bridge._register_session("session-dev", mock_writer)
-            session = bridge._sessions["session-dev"]
+            await bridge._register_session("aabbccdd-session-dev", mock_writer)
+            session = bridge._sessions["aabbccdd-session-dev"]
 
-            # 模拟多个配对设备
             dev1 = DeviceConnection(
                 reader=MagicMock(), writer=mock_writer,
                 addr=("127.0.0.1", 12345), uid="dev-1",
@@ -151,10 +152,10 @@ class TestBridgeSession:
             )
             session.paired_devices.add(dev1)
             session.paired_devices.add(dev2)
-            dev1.session_id = "session-dev"
-            dev2.session_id = "session-dev"
+            dev1.session_id = "aabbccdd-session-dev"
+            dev2.session_id = "aabbccdd-session-dev"
 
-            bridge._unregister_session("session-dev")
+            bridge._unregister_session("aabbccdd-session-dev")
 
             assert dev1.session_id is None
             assert dev2.session_id is None
@@ -166,7 +167,7 @@ class TestBridgeSession:
     def test_pairing_code_uniqueness(self, bridge, mock_writer):
         async def run_test():
             for i in range(10):
-                await bridge._register_session(f"session-{i}", mock_writer)
+                await bridge._register_session(f"{i:06x}-session", mock_writer)
 
         asyncio.run(run_test())
 

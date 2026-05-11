@@ -31,7 +31,6 @@ import logging
 import os
 import random
 import signal
-import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
@@ -408,7 +407,7 @@ class Bridge:
             logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")
             self._print_pairing_banner(code, session_id)
 
-        rid = str(event.get("tool_use_id") or f"req_{int(time.time() * 1000)}")
+        rid = str(event.get("tool_use_id") or f"req_{uuid.uuid4().hex[:12]}")
         logger.info(f"[审批] 收到请求 session={session_id[:8]}... id={rid}")
 
         # 创建待处理请求

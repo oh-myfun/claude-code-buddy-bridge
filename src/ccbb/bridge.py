@@ -192,7 +192,7 @@ class Bridge:
             device.writer.write(payload)
             await device.writer.drain()
         except Exception as e:
-            logger.warning(f"发送消息到设备 {device.addr} 失败: {e}")
+            logger.warning(f"[设备] 发送到 {device.addr} 失败: {e}")
             self._remove_device(device)
 
     # ── 会话管理 ────────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ class Bridge:
             session = self._sessions[session_id]
             writer.write(json.dumps({"pairing_code": session.pairing_code}).encode() + b"\n")
             await writer.drain()
-            logger.info(f"Session 恢复: {session_id[:8]}... 配对码={session.pairing_code}")
+            logger.info(f"[Session] 恢复 {session_id[:8]}... 配对码={session.pairing_code}")
             return
 
         code = generate_pairing_code()
@@ -214,7 +214,7 @@ class Bridge:
         session = Session(session_id=session_id, pairing_code=code)
         self._sessions[session_id] = session
         self._pairing_index[code] = session_id
-        logger.info(f"Session 注册: {session_id[:8]}... 配对码={code}")
+        logger.info(f"[Session] 注册 {session_id[:8]}... 配对码={code}")
 
         self._print_pairing_banner(code, session_id)
 
@@ -252,7 +252,7 @@ class Bridge:
                 req.decision_future.set_result("timeout")
         session.pending_requests.clear()
 
-        logger.info(f"Session 结束: {session_id[:8]}...")
+        logger.info(f"[Session] 结束 {session_id[:8]}...")
 
     # ── 设备管理 ────────────────────────────────────────────────────────────
 
@@ -278,7 +278,7 @@ class Bridge:
             await self._send_to_device(device, {
                 "type": "pairing_failed", "data": {"reason": "配对码无效或已过期"},
             })
-            logger.warning(f"设备 {device.addr} 配对失败，无效配对码: {pairing_code}")
+            logger.warning(f"[设备] {device.addr} 配对失败，无效配对码: {pairing_code}")
             return False
 
         session = self._sessions.get(session_id)
@@ -303,7 +303,7 @@ class Bridge:
             first_req = next(iter(session.pending_requests.values()))
             await self._send_to_device(device, {"type": "request", "data": first_req.raw})
 
-        logger.info(f"设备 {device.addr} 配对到 session {session_id[:8]}... "
+        logger.info(f"[设备] {device.addr} 配对到 session {session_id[:8]}... "
                      f"(共 {len(session.paired_devices)} 个设备)")
         return True
 
@@ -313,7 +313,6 @@ class Bridge:
                              first_msg: dict) -> None:
         """处理设备连接（持久连接）"""
         addr = writer.get_extra_info("peername")
-        logger.info(f"新设备连接: {addr}")
 
         device = DeviceConnection(reader=reader, writer=writer, addr=addr, uid=str(uuid.uuid4()))
         self._unpaired_devices.add(device)
@@ -347,16 +346,16 @@ class Bridge:
                     try:
                         msg = json.loads(line.decode("utf-8"))
                     except Exception as e:
-                        logger.warning(f"设备 {addr} 消息解析失败: {line!r} — {e}")
+                        logger.warning(f"[设备] {addr} 消息解析失败: {line!r} — {e}")
                         continue
-                    logger.debug(f"设备 {addr} → 主机: {json.dumps(msg, ensure_ascii=False)}")
+                    logger.debug(f"[设备] {addr} 收到: {json.dumps(msg, ensure_ascii=False)}")
                     await self._process_device_message(device, msg)
 
         except Exception as e:
-            logger.error(f"设备连接处理异常: {e}")
+            logger.error(f"[设备] {addr} 异常: {e}")
         finally:
             self._remove_device(device)
-            logger.info(f"设备断开: {addr}")
+            logger.info(f"[设备] {addr} 断开")
 
     async def _process_device_message(self, device: DeviceConnection, msg: dict) -> None:
         """处理单条设备消息：统一 {type, data} 格式"""
@@ -401,9 +400,9 @@ class Bridge:
         """处理设备审批决策"""
         rid = self._resolve_decision(device.session_id or "", decision)
         if rid:
-            logger.info(f"收到决策: {decision} id={rid}")
+            logger.info(f"[审批] 收到决策 id={rid} behavior={decision.get('behavior')}")
         else:
-            logger.warning(f"收到孤立/过期决策: {decision}")
+            logger.warning(f"[审批] 孤立/过期决策: {decision}")
 
     # ── Hook 连接处理 ───────────────────────────────────────────────────────
 
@@ -430,7 +429,7 @@ class Bridge:
                 await self._process_permission_request(first_msg, writer, reader)
 
         except Exception as e:
-            logger.error(f"Hook 连接处理异常: {e}")
+            logger.error(f"[Hook] 异常: {e}")
         finally:
             try:
                 writer.close()
@@ -457,7 +456,7 @@ class Bridge:
             return
         rid = next(iter(session.pending_requests))
         req = session.pending_requests[rid]
-        logger.info(f"推送下一个请求 id={rid}")
+        logger.info(f"[审批] 推送下一个请求 id={rid}")
         await self._broadcast(session, "request", req.raw)
 
     async def _process_permission_request(self, event: dict, writer: asyncio.StreamWriter,
@@ -477,11 +476,11 @@ class Bridge:
             session = Session(session_id=session_id, pairing_code=code)
             self._sessions[session_id] = session
             self._pairing_index[code] = session_id
-            logger.info(f"Session 自动恢复: {session_id[:8]}... 配对码={code}")
+            logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")
             self._print_pairing_banner(code, session_id)
 
         rid = str(event.get("tool_use_id") or f"req_{int(time.time() * 1000)}")
-        logger.info(f"收到请求 session={session_id[:8]}... id={rid}")
+        logger.info(f"[审批] 收到请求 session={session_id[:8]}... id={rid}")
 
         # 创建待处理请求
         loop = asyncio.get_running_loop()
@@ -495,7 +494,7 @@ class Bridge:
 
         # 只有队首请求才推送，其余排队等待
         if len(session.pending_requests) == 1:
-            logger.info(f"推送请求到设备 id={rid}")
+            logger.info(f"[审批] 推送请求 id={rid}")
             await self._broadcast(session, "request", event)
 
         # 等待：设备/web 响应 或 hook 断开（超时由 Claude Code 管理）
@@ -522,7 +521,7 @@ class Bridge:
         else:
             result = "closed"
             hook_disconnected = True
-            logger.info(f"id={rid} Hook 连接已断开")
+            logger.info(f"[Hook] id={rid} 连接已断开")
         session.pending_requests.pop(rid, None)
 
         # 广播审批结束到所有订阅者
@@ -537,7 +536,7 @@ class Bridge:
             resp = result if isinstance(result, dict) else {"behavior": result}
             writer.write(json.dumps(resp).encode() + b"\n")
             await writer.drain()
-            logger.info(f"id={rid} → {resp.get('behavior', resp)}")
+            logger.info(f"[Hook] id={rid} 响应 {resp.get('behavior', resp)}")
 
     # ── 连接识别与分发 ──────────────────────────────────────────────────────
 
@@ -559,12 +558,12 @@ class Bridge:
     ) -> None:
         """处理客户端连接：通过首条消息识别类型并分发"""
         addr = writer.get_extra_info("peername")
-        logger.info(f"新连接: {addr}")
+        logger.info(f"[连接] 新连接 {addr}")
 
         try:
             first_line = await asyncio.wait_for(reader.readline(), timeout=60.0)
         except asyncio.TimeoutError:
-            logger.warning(f"[{addr}] 60 秒内未收到消息")
+            logger.warning(f"[连接] {addr} 60 秒内未收到消息")
             writer.close()
             return
 
@@ -576,7 +575,7 @@ class Bridge:
 
         # HTTP 协议检测
         if first_str.startswith(("GET ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "HEAD ")):
-            logger.info(f"[{addr}] 识别为 HTTP 连接")
+            logger.info(f"[Web] {addr} HTTP 连接")
             from ccbb.web.handler import WebHandler
             handler = WebHandler(self)
             await handler.handle(reader, writer, first_str)
@@ -585,18 +584,18 @@ class Bridge:
         try:
             msg = json.loads(first_str)
         except Exception as e:
-            logger.warning(f"[{addr}] JSON 解析失败: {e}")
+            logger.warning(f"[连接] {addr} JSON 解析失败: {e}")
             writer.close()
             return
 
         if self._is_device_message(msg):
-            logger.info(f"[{addr}] 识别为设备连接")
+            logger.info(f"[设备] {addr} TCP 连接")
             await self._handle_device(reader, writer, first_msg=msg)
         elif self._is_hook_request(msg):
-            logger.info(f"[{addr}] 识别为 Hook 连接")
+            logger.info(f"[Hook] {addr} 连接 action={msg.get('action', 'PermissionRequest')}")
             await self._handle_hook(reader, writer, first_msg=msg)
         else:
-            logger.warning(f"[{addr}] 无法识别的消息格式: {msg}")
+            logger.warning(f"[连接] {addr} 无法识别的消息格式: {msg}")
             writer.close()
 
 

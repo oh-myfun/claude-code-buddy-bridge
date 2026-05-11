@@ -166,6 +166,9 @@ class WebHandler:
             self._send_response(writer, 404, "Session not found")
             return
 
+        sid_short = session_id[:8]
+        logger.info(f"[Web] SSE 连接 session={sid_short}...")
+
         queue: asyncio.Queue = asyncio.Queue()
         session.web_queues.append(queue)
 
@@ -203,6 +206,7 @@ class WebHandler:
         finally:
             if queue in session.web_queues:
                 session.web_queues.remove(queue)
+            logger.info(f"[Web] SSE 断开 session={sid_short}...")
 
     # ── API: 审批决策 ───────────────────────────────────────────────────────
 
@@ -223,7 +227,7 @@ class WebHandler:
             self._send_json(writer, 400, {"error": "Missing behavior"})
             return
 
-        logger.info(f"Web 审批决策: session={session_id[:8]}... decision={decision}")
+        logger.info(f"[审批] Web决策 session={session_id[:8]}... behavior={decision.get('behavior')}")
 
         rid = self._bridge._resolve_decision(session_id, decision)
         if rid:

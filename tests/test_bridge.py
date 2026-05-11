@@ -94,9 +94,9 @@ def test_is_hook_request():
 
 def test_is_device_message():
     bridge = Bridge()
-    assert bridge._is_device_message({"cmd": "pair"})
-    assert bridge._is_device_message({"cmd": "permission"})
-    assert bridge._is_device_message({"cmd": "hello"})
+    assert bridge._is_device_message({"type": "hello"})
+    assert bridge._is_device_message({"type": "pair", "data": {"pairing_code": "123456"}})
+    assert bridge._is_device_message({"type": "decision", "data": {"behavior": "allow"}})
     assert not bridge._is_device_message({"tool_name": "Bash"})
     assert not bridge._is_device_message({"session_id": "abc"})
 

@@ -31,7 +31,6 @@ import logging
 import os
 import random
 import signal
-import socket
 import time
 import unicodedata
 import uuid
@@ -91,7 +90,6 @@ class Session:
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_requests: Dict[str, PendingRequest] = field(default_factory=dict)
     entries: list[str] = field(default_factory=list)
-    web_queues: list = field(default_factory=list)  # SSE 订阅者
 
 
 @dataclass
@@ -120,7 +118,6 @@ class Bridge:
         self._unpaired_devices: Set[DeviceConnection] = set()
         self._host = host
         self._port = port
-        self._local_ips: list[str] = []
 
     # ── 设备消息发送 ────────────────────────────────────────────────────────
 
@@ -143,26 +140,11 @@ class Bridge:
         return " " * left + s + " " * (pad - left)
 
     def _print_pairing_banner(self, pairing_code: str, session_id: str) -> None:
-        """在 daemon 终端显示醒目的配对码 + QR 码（每个 IP 一个 QR）"""
-        hosts = self._local_ips if self._local_ips else ["127.0.0.1"]
-        qr_entries: list[tuple[str, str]] = []  # (url, qr_str)
-        for host in hosts:
-            url = f"http://{host}:{self._port}/pair?code={pairing_code}"
-            try:
-                from ccbb.qrcode import qr_to_terminal
-                qr_str = qr_to_terminal(url)
-                qr_entries.append((url, qr_str))
-            except Exception:
-                qr_entries.append((url, ""))
-
+        """在 daemon 终端显示醒目的配对码"""
         spaced_code = "  ".join(pairing_code)
         sid_short = session_id[:8] if len(session_id) > 8 else session_id
 
-        # 自适应边框宽度
         w = 42
-        for url, _ in qr_entries:
-            w = max(w, self._display_width(url) + 4)
-
         lines = [
             "",
             "╔" + "═" * w + "╗",
@@ -170,16 +152,7 @@ class Bridge:
             "║" + "═" * w + "║",
             "║" + self._pad_center(spaced_code, w) + "║",
             "║" + "═" * w + "║",
-        ]
-        for i, (url, qr_str) in enumerate(qr_entries):
-            if i > 0:
-                lines.append("║" + " " * w + "║")
-            lines.append("║" + self._pad_center(url, w) + "║")
-            if qr_str:
-                for line in qr_str.splitlines():
-                    lines.append("║" + self._pad_center(line, w) + "║")
-        lines += [
-            "║" + self._pad_center("在审批设备上输入配对码或扫描二维码", w) + "║",
+            "║" + self._pad_center("在审批设备上输入配对码", w) + "║",
             "╚" + "═" * w + "╝",
             "",
         ]
@@ -237,14 +210,6 @@ class Bridge:
                 "type": "session_end", "data": {"session_id": session_id},
             }))
         session.paired_devices.clear()
-
-        # 通知 web 订阅者
-        for q in list(session.web_queues):
-            try:
-                q.put_nowait({"type": "session_end", "data": {"session_id": session_id}})
-            except Exception:
-                pass
-        session.web_queues.clear()
 
         # 取消所有挂起的请求
         for rid, req in list(session.pending_requests.items()):
@@ -437,16 +402,11 @@ class Bridge:
                 pass
 
     async def _broadcast(self, session: Session, msg_type: str, data: dict) -> None:
-        """统一广播到所有 TCP 设备和 SSE 订阅者"""
+        """广播到所有配对设备"""
         msg = {"type": msg_type, "data": data}
         for dev in list(session.paired_devices):
             try:
                 await self._send_to_device(dev, msg)
-            except Exception:
-                pass
-        for q in list(session.web_queues):
-            try:
-                q.put_nowait(msg)
             except Exception:
                 pass
 
@@ -549,7 +509,7 @@ class Bridge:
         )
 
     def _is_device_message(self, msg: dict) -> bool:
-        return "cmd" in msg
+        return msg.get("type") in ("hello", "pair", "decision")
 
     async def handle_client(
         self,
@@ -571,14 +531,6 @@ class Bridge:
             return
 
         first_str = first_line.decode("utf-8", errors="replace").strip()
-
-        # HTTP 协议检测
-        if first_str.startswith(("GET ", "POST ", "PUT ", "DELETE ", "OPTIONS ", "HEAD ")):
-            logger.info(f"[Web] 连接 {addr}")
-            from ccbb.web.handler import WebHandler
-            handler = WebHandler(self)
-            await handler.handle(reader, writer, first_str)
-            return
 
         try:
             msg = json.loads(first_str)
@@ -625,36 +577,6 @@ async def run() -> None:
         bridge.handle_client, host, port,
     )
     logger.info(f"TCP 服务端已启动，监听 {host}:{port}")
-    logger.info("  支持多会话多设备配对")
-
-    # 探测本机所有 IP 供二维码使用
-    local_ips: list[str] = []
-    try:
-        hostname = socket.gethostname()
-        seen: set[str] = set()
-        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
-            if ip and not ip.startswith("127.") and ip not in seen:
-                seen.add(ip)
-                local_ips.append(ip)
-    except Exception:
-        pass
-    # 补充默认路由 IP
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1.0)
-        s.connect(("8.8.8.8", 80))
-        default_ip = s.getsockname()[0]
-        s.close()
-        if default_ip not in local_ips:
-            local_ips.insert(0, default_ip)
-    except Exception:
-        pass
-    bridge._local_ips = local_ips
-    if local_ips:
-        logger.info(f"  本机 IP: {', '.join(local_ips)}")
-    else:
-        logger.info("  本机 IP: 127.0.0.1 (仅本地)")
 
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
 

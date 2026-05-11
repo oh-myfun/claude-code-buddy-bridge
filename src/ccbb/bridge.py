@@ -244,7 +244,7 @@ class Bridge:
         # 如果有挂起的请求，推送队首给新设备
         if session.pending_requests:
             first_req = next(iter(session.pending_requests.values()))
-            await self._send_to_device(device, {"type": "request", "data": first_req.raw})
+            await self._send_to_device(device, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
 
         logger.info(f"[设备] {device.addr} 配对到 session {session_id[:8]}... "
                      f"(共 {len(session.paired_devices)} 个设备)")
@@ -321,8 +321,7 @@ class Bridge:
             return None
 
         rid = (decision.get("ccbb_request_id")
-               or decision.get("request_id")
-               or decision.get("tool_use_id"))
+               or decision.get("request_id"))
         if rid:
             req = session.pending_requests.get(rid)
         else:
@@ -425,7 +424,7 @@ class Bridge:
             logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")
             self._print_pairing_banner(code, session_id)
 
-        rid = str(event.get("tool_use_id") or f"req_{uuid.uuid4().hex[:12]}")
+        rid = f"req_{uuid.uuid4().hex[:12]}"
         logger.info(f"[审批] 收到请求 session={session_id[:8]}... id={rid}")
 
         # 创建待处理请求
@@ -437,7 +436,7 @@ class Bridge:
         if not session.head_pushed:
             session.head_pushed = True
             logger.info(f"[审批] 推送请求 id={rid}")
-            await self._broadcast(session, "request", event)
+            await self._broadcast(session, "request", {**event, "ccbb_request_id": rid})
 
         # 等待：设备响应 或 hook 断开（超时由 Claude Code 管理）
         hook_disconnected = False
@@ -476,7 +475,7 @@ class Bridge:
             next_req = next(iter(session.pending_requests.values()))
             session.head_pushed = True
             logger.info(f"[审批] 推送下一个请求 id={next_req.id}")
-            await self._broadcast(session, "request", next_req.raw)
+            await self._broadcast(session, "request", {**next_req.raw, "ccbb_request_id": next_req.id})
 
         # 响应 Hook（透传 decision 对象，hook 断开则跳过）
         if not hook_disconnected:

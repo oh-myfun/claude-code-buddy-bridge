@@ -41,7 +41,6 @@ async def hook_request(session_id: str, tool: str, cmd: str, req_id: str, timeou
         "session_id": session_id,
         "tool_name": tool,
         "tool_input": {"command": cmd},
-        "tool_use_id": req_id,
     }
     writer.write((json.dumps(event) + "\n").encode())
     await writer.drain()
@@ -111,7 +110,7 @@ def _brief(msg: dict) -> str:
     if t == "waiting_pairing":
         return "type=waiting_pairing"
     if t == "request":
-        return f"type=request tool={d.get('tool_name')} id={d.get('tool_use_id','?')}"
+        return f"type=request tool={d.get('tool_name')} id={d.get('ccbb_request_id','?')}"
     if t == "done":
         return f"type=done decision={d.get('decision')} id={d.get('id','?')}"
     return json.dumps(msg, ensure_ascii=False)[:100]
@@ -157,7 +156,7 @@ async def main():
     print(f"\n  设备收到的请求数（队首推送）: {len(requests_on_device)}")
     for r in requests_on_device:
         d = r.get("data", {})
-        print(f"    - {d.get('tool_name')} {d.get('tool_input', {}).get('command')} (id={d.get('tool_use_id')})")
+        print(f"    - {d.get('tool_name')} {d.get('tool_input', {}).get('command')}")
 
     # ── Step 4: 逐个审批（模拟设备发送决策）──────────
     print("\n[4] 设备逐个审批（bridge 控制推送节奏）")
@@ -178,9 +177,11 @@ async def main():
             print(f"  等待请求 {i+1} 超时")
             continue
 
-        rid = req_msg.get("data", {}).get("tool_use_id")
-        decision = {"type": "decision", "data": {"behavior": "allow", "ccbb_request_id": rid}}
-        print(f"  审批 {rid}: {decision}")
+        rid = req_msg.get("data", {}).get("ccbb_request_id")
+        decision = {"type": "decision", "data": {"behavior": "allow"}}
+        if rid:
+            decision["data"]["ccbb_request_id"] = rid
+        print(f"  审批 {i+1}: {decision}")
         dev_writer.write((json.dumps(decision) + "\n").encode())
         await dev_writer.drain()
         await asyncio.sleep(0.5)

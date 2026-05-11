@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check all decoded JS pose strings are exactly 12 characters."""
-import os, re
+import os
+import re
 
 def decode_js_str(s):
     result = []

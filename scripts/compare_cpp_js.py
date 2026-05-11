@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Accurate comparison: decode both C++ and JS strings, then compare."""
-import re, os, sys
+import re
+import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-from convert_buddies import extract_strings, extract_func, parse_poses, parse_p, parse_seq, parse_tick, parse_arr
+from convert_buddies import extract_func, parse_poses, parse_p, parse_seq, parse_tick, parse_arr
 
 SPECIES = [
     'cat','capybara','duck','goose','blob','dragon',

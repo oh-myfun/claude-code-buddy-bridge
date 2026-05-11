@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Check pose character counts and compare with original C++ source."""
-import os, re, sys
+import os
+import re
+import sys
 
 def extract_strings(text):
     result = []

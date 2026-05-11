@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Convert claude-desktop-buddy C++ species files to individual JS files."""
-import re, os, sys
+import re
+import os
+import sys
 
 SPECIES = [
     'cat','capybara','duck','goose','blob','dragon',

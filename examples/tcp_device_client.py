@@ -166,9 +166,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 print(f"{'=' * 60}\n")
             elif cmd.lower() == 'a' and state.pending_event:
                 decision = {"behavior": "allow"}
-                tid = state.pending_event.get("tool_use_id")
-                if tid:
-                    decision["ccbb_request_id"] = tid
+                rid = state.pending_event.get("ccbb_request_id")
+                if rid:
+                    decision["ccbb_request_id"] = rid
                 msg = {"type": "decision", "data": decision}
                 print(f"[设备] 发送允许: {msg}")
                 writer.write((json.dumps(msg) + "\n").encode())
@@ -179,9 +179,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 suggestions = state.pending_event.get("permission_suggestions")
                 if suggestions:
                     decision = {"behavior": "allow", "updatedPermissions": suggestions}
-                    tid = state.pending_event.get("tool_use_id")
-                    if tid:
-                        decision["ccbb_request_id"] = tid
+                    rid = state.pending_event.get("ccbb_request_id")
+                    if rid:
+                        decision["ccbb_request_id"] = rid
                     msg = {"type": "decision", "data": decision}
                     print(f"[设备] 发送允许并记住全部规则: {msg}")
                     writer.write((json.dumps(msg) + "\n").encode())
@@ -221,9 +221,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                             "behavior": "allow",
                             "updatedInput": {"questions": questions, "answers": answers},
                         }
-                        tid = state.pending_event.get("tool_use_id")
-                        if tid:
-                            decision["ccbb_request_id"] = tid
+                        rid = state.pending_event.get("ccbb_request_id")
+                        if rid:
+                            decision["ccbb_request_id"] = rid
                         msg = {"type": "decision", "data": decision}
                         print(f"[设备] 选择: {', '.join(selected_labels)}")
                         print(f"[设备] 发送回答: {msg}")
@@ -263,9 +263,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                             "behavior": "allow",
                             "updatedPermissions": selected_perms,
                         }
-                        tid = state.pending_event.get("tool_use_id")
-                        if tid:
-                            decision["ccbb_request_id"] = tid
+                        rid = state.pending_event.get("ccbb_request_id")
+                        if rid:
+                            decision["ccbb_request_id"] = rid
                         msg = {"type": "decision", "data": decision}
                         print(f"[设备] 发送允许并记住规则: {msg}")
                         writer.write((json.dumps(msg) + "\n").encode())
@@ -278,9 +278,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                     "behavior": "deny",
                     "message": "已通过 ccbb 拒绝此操作",
                 }
-                tid = state.pending_event.get("tool_use_id")
-                if tid:
-                    decision["ccbb_request_id"] = tid
+                rid = state.pending_event.get("ccbb_request_id")
+                if rid:
+                    decision["ccbb_request_id"] = rid
                 msg = {"type": "decision", "data": decision}
                 print(f"[设备] 发送拒绝: {msg}")
                 writer.write((json.dumps(msg) + "\n").encode())
@@ -365,9 +365,8 @@ async def main():
                     print(f"[设备] 会话已结束 (session: {sid[:8] if len(sid) > 8 else sid}...)")
                     print("[设备] 请输入新的配对码")
                 elif msg_type == "done":
-                    # 审批完成通知
                     done_id = data.get("id", "?")
-                    if state.pending_event and state.pending_event.get("tool_use_id") == done_id:
+                    if state.pending_event and state.pending_event.get("ccbb_request_id") == done_id:
                         state.pending_event = None
                     print(f"\n[设备] 审批已完成 (id={done_id}, decision={data.get('decision')})")
                     print("[设备] 等待下一个审批请求...")

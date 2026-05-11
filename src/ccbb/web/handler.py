@@ -181,9 +181,10 @@ class WebHandler:
             )
             await writer.drain()
 
-            # 如果已有 pending request，立即推送（透传）
-            if session.pending_request:
-                await self._sse_push(writer, "request", session.pending_request.raw)
+            # 如果有挂起的请求，推送队首
+            if session.pending_requests:
+                first_req = next(iter(session.pending_requests.values()))
+                await self._sse_push(writer, "request", first_req.raw)
 
             # 等待事件
             while True:
@@ -222,15 +223,11 @@ class WebHandler:
 
         logger.info(f"Web 审批决策: session={session_id[:8]}... decision={decision}")
 
-        session = self._bridge._sessions.get(session_id)
-        if not session or not session.pending_request:
+        rid = self._bridge._resolve_decision(session_id, decision)
+        if rid:
+            self._send_json(writer, 200, {"ok": True})
+        else:
             self._send_json(writer, 404, {"error": "No pending request"})
-            return
-
-        session.pending_request.decision_future.set_result(decision)
-        session.pending_request = None
-
-        self._send_json(writer, 200, {"ok": True})
 
     # ── 响应工具 ────────────────────────────────────────────────────────────
 

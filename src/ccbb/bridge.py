@@ -89,7 +89,7 @@ class Session:
     session_id: str
     pairing_code: str
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
-    pending_request: Optional[PendingRequest] = None
+    pending_requests: Dict[str, PendingRequest] = field(default_factory=dict)
     entries: list[str] = field(default_factory=list)
     web_queues: list = field(default_factory=list)  # SSE 订阅者
 
@@ -246,9 +246,11 @@ class Bridge:
                 pass
         session.web_queues.clear()
 
-        # 取消挂起的请求
-        if session.pending_request and not session.pending_request.decision_future.done():
-            session.pending_request.decision_future.set_result("timeout")
+        # 取消所有挂起的请求
+        for rid, req in list(session.pending_requests.items()):
+            if not req.decision_future.done():
+                req.decision_future.set_result("timeout")
+        session.pending_requests.clear()
 
         logger.info(f"Session 结束: {session_id[:8]}...")
 
@@ -298,9 +300,10 @@ class Bridge:
             "session_id": session_id,
         })
 
-        # 如果有挂起的请求，直接透传给新设备
-        if session.pending_request:
-            await self._send_to_device(device, session.pending_request.raw)
+        # 如果有挂起的请求，推送队首给新设备
+        if session.pending_requests:
+            first_req = next(iter(session.pending_requests.values()))
+            await self._send_to_device(device, first_req.raw)
 
         logger.info(f"设备 {device.addr} 配对到 session {session_id[:8]}... "
                      f"(共 {len(session.paired_devices)} 个设备)")
@@ -371,16 +374,38 @@ class Bridge:
         elif msg.get("cmd") == "hello":
             pass
 
-    async def _handle_permission_decision(self, device: DeviceConnection, decision: dict) -> None:
-        """处理审批决策：透传给 hook"""
-        session = self._sessions.get(device.session_id or "")
-        if not session or not session.pending_request:
-            logger.warning(f"收到孤立决策: {decision}")
-            return
+    def _resolve_decision(self, session_id: str, decision: dict) -> Optional[str]:
+        """按请求 ID 查找并 resolve pending request，返回 rid 或 None"""
+        session = self._sessions.get(session_id)
+        if not session or not session.pending_requests:
+            return None
 
-        session.pending_request.decision_future.set_result(decision)
-        session.pending_request = None
-        logger.info(f"收到决策: {decision}")
+        rid = (decision.get("ccbb_request_id")
+               or decision.get("request_id")
+               or decision.get("tool_use_id"))
+        if rid:
+            req = session.pending_requests.get(rid)
+        else:
+            # 向后兼容：resolve 最早的 pending request
+            if session.pending_requests:
+                rid = next(iter(session.pending_requests))
+                req = session.pending_requests[rid]
+            else:
+                return None
+
+        if req and not req.decision_future.done():
+            req.decision_future.set_result(decision)
+            session.pending_requests.pop(rid, None)
+            return rid
+        return None
+
+    async def _handle_permission_decision(self, device: DeviceConnection, decision: dict) -> None:
+        """处理设备审批决策"""
+        rid = self._resolve_decision(device.session_id or "", decision)
+        if rid:
+            logger.info(f"收到决策: {decision} id={rid}")
+        else:
+            logger.warning(f"收到孤立/过期决策: {decision}")
 
     # ── Hook 连接处理 ───────────────────────────────────────────────────────
 
@@ -414,9 +439,31 @@ class Bridge:
             except Exception:
                 pass
 
+    def _broadcast_request(self, session: Session, event: dict) -> None:
+        """推送一个审批请求到所有配对设备和 web 订阅者"""
+        for dev in list(session.paired_devices):
+            try:
+                asyncio.ensure_future(self._send_to_device(dev, event))
+            except Exception:
+                pass
+        for q in list(session.web_queues):
+            try:
+                q.put_nowait({"type": "request", "data": event})
+            except Exception:
+                pass
+
+    def _push_next_request(self, session: Session) -> None:
+        """推送队列中下一个待处理请求到所有订阅者"""
+        if not session.pending_requests:
+            return
+        rid = next(iter(session.pending_requests))
+        req = session.pending_requests[rid]
+        logger.info(f"推送下一个请求 id={rid}")
+        self._broadcast_request(session, req.raw)
+
     async def _process_permission_request(self, event: dict, writer: asyncio.StreamWriter,
                                            reader: asyncio.StreamReader) -> None:
-        """处理审批请求：广播给所有订阅者，等待设备响应或 hook 断开，再广播结果"""
+        """处理审批请求：队首时推送，等待决策后推送下一个"""
         session_id = event.get("session_id", "")
         if not session_id:
             logger.warning("PermissionRequest 缺少 session_id")
@@ -424,34 +471,33 @@ class Bridge:
 
         session = self._sessions.get(session_id)
         if session is None:
-            logger.warning(f"未知 session: {session_id[:8]}...")
-            return
+            # daemon 重启后 session 丢失，自动恢复注册
+            code = generate_pairing_code()
+            while code in self._pairing_index:
+                code = generate_pairing_code()
+            session = Session(session_id=session_id, pairing_code=code)
+            self._sessions[session_id] = session
+            self._pairing_index[code] = session_id
+            logger.info(f"Session 自动恢复: {session_id[:8]}... 配对码={code}")
+            self._print_pairing_banner(code, session_id)
 
         rid = str(event.get("tool_use_id") or f"req_{int(time.time() * 1000)}")
         logger.info(f"收到请求 session={session_id[:8]}... id={rid}")
 
-        # 创建待处理请求（透传原始 CC 事件）
+        # 创建待处理请求
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        session.pending_request = PendingRequest(id=rid, decision_future=fut, raw=event)
+        session.pending_requests[rid] = PendingRequest(id=rid, decision_future=fut, raw=event)
 
         tool_name = event.get("tool_name") or "?"
         hint = _make_hint(event.get("tool_input"))
         session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool_name}: {hint}', 50)}")
         session.entries = session.entries[:ENTRIES_MAX]
 
-        # 广播审批请求到所有订阅者（透传原始事件）
-        for dev in list(session.paired_devices):
-            try:
-                await self._send_to_device(dev, event)
-            except Exception as e:
-                logger.warning(f"发送请求到 {dev.addr} 失败: {e}")
-
-        for q in list(session.web_queues):
-            try:
-                q.put_nowait({"type": "request", "data": event})
-            except Exception:
-                pass
+        # 只有队首请求才推送，其余排队等待
+        if len(session.pending_requests) == 1:
+            logger.info(f"推送请求到设备 id={rid}")
+            self._broadcast_request(session, event)
 
         # 等待：设备/web 响应 或 hook 断开（超时由 Claude Code 管理）
         hook_disconnected = False
@@ -478,13 +524,13 @@ class Bridge:
             result = "closed"
             hook_disconnected = True
             logger.info(f"id={rid} Hook 连接已断开")
-        session.pending_request = None
+        session.pending_requests.pop(rid, None)
 
         # 广播审批结束到所有订阅者
         behavior = result.get("behavior", "closed") if isinstance(result, dict) else (result or "closed")
         for dev in list(session.paired_devices):
             try:
-                await self._send_to_device(dev, {"done": behavior})
+                await self._send_to_device(dev, {"done": behavior, "id": rid})
             except Exception:
                 pass
         for q in list(session.web_queues):
@@ -492,6 +538,9 @@ class Bridge:
                 q.put_nowait({"type": "done", "data": {"id": rid, "decision": behavior}})
             except Exception:
                 pass
+
+        # 推送队列中的下一个请求
+        self._push_next_request(session)
 
         # 响应 Hook（透传 decision 对象，hook 断开则跳过）
         if not hook_disconnected:

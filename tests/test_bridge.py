@@ -47,7 +47,7 @@ def test_session_creation():
     assert session.session_id == "test-session-123"
     assert session.pairing_code == "456789"
     assert session.paired_devices == set()
-    assert session.pending_request is None
+    assert session.pending_requests == {}
     assert session.entries == []
 
 
@@ -375,15 +375,16 @@ class TestSuggestions:
 
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
-            session.pending_request = PendingRequest(
+            session.pending_requests["req-up"] = PendingRequest(
                 id="req-up", decision_future=fut,
                 raw={"tool_name": "Bash", "tool_input": {"command": "ls"}},
             )
 
-            # 设备直接发送 CC decision 格式
+            # 设备直接发送 CC decision 格式（含请求 ID）
             updated_perms = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls"}], "behavior": "allow", "destination": "localSettings"}]
             await bridge._handle_permission_decision(device, {
                 "behavior": "allow",
+                "ccbb_request_id": "req-up",
                 "updatedPermissions": updated_perms,
             })
 

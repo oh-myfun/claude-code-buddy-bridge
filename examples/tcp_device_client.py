@@ -167,6 +167,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 print(f"{'=' * 60}\n")
             elif cmd.lower() == 'a' and state.pending_event:
                 decision = {"behavior": "allow"}
+                tid = state.pending_event.get("tool_use_id")
+                if tid:
+                    decision["ccbb_request_id"] = tid
                 print(f"[设备] 发送允许: {decision}")
                 writer.write((json.dumps(decision) + "\n").encode())
                 await writer.drain()
@@ -176,6 +179,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                 suggestions = state.pending_event.get("permission_suggestions")
                 if suggestions:
                     decision = {"behavior": "allow", "updatedPermissions": suggestions}
+                    tid = state.pending_event.get("tool_use_id")
+                    if tid:
+                        decision["ccbb_request_id"] = tid
                     print(f"[设备] 发送允许并记住全部规则: {decision}")
                     writer.write((json.dumps(decision) + "\n").encode())
                     await writer.drain()
@@ -214,6 +220,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                             "behavior": "allow",
                             "updatedInput": {"questions": questions, "answers": answers},
                         }
+                        tid = state.pending_event.get("tool_use_id")
+                        if tid:
+                            decision["ccbb_request_id"] = tid
                         print(f"[设备] 选择: {', '.join(selected_labels)}")
                         print(f"[设备] 发送回答: {decision}")
                         writer.write((json.dumps(decision) + "\n").encode())
@@ -252,6 +261,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                             "behavior": "allow",
                             "updatedPermissions": selected_perms,
                         }
+                        tid = state.pending_event.get("tool_use_id")
+                        if tid:
+                            decision["ccbb_request_id"] = tid
                         print(f"[设备] 发送允许并记住规则: {decision}")
                         writer.write((json.dumps(decision) + "\n").encode())
                         await writer.drain()
@@ -265,6 +277,9 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                     "behavior": "deny",
                     "message": "已通过 ccbb 拒绝此操作",
                 }
+                tid = state.pending_event.get("tool_use_id")
+                if tid:
+                    decision["ccbb_request_id"] = tid
                 print(f"[设备] 发送拒绝: {decision}")
                 writer.write((json.dumps(decision) + "\n").encode())
                 await writer.drain()
@@ -348,8 +363,10 @@ async def main():
                     print("[设备] 请输入新的配对码")
                 elif "done" in msg:
                     # 审批完成通知
-                    state.pending_event = None
-                    print(f"\n[设备] 审批已完成 (decision={msg['done']})")
+                    done_id = msg.get("id", "?")
+                    if state.pending_event and state.pending_event.get("tool_use_id") == done_id:
+                        state.pending_event = None
+                    print(f"\n[设备] 审批已完成 (id={done_id}, decision={msg['done']})")
                     print("[设备] 等待下一个审批请求...")
                 elif "hook_event_name" in msg or "tool_name" in msg:
                     # 原始 CC 事件（审批请求）

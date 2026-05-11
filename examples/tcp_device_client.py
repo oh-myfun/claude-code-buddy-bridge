@@ -4,9 +4,8 @@
 模拟一个简单的审批按钮设备，作为 TCP 客户端连接到服务端
 
 协议说明：
-- 收到原始 CC 事件（PermissionRequest）时展示审批信息
-- 直接发送 CC decision 格式（{"behavior": "allow", ...}）
-- 控制消息使用 cmd 字段（pairing, session_end 等）
+- 所有来自 bridge 的消息使用统一格式 {"type": "...", "data": {...}}
+- 设备发送 CC decision 格式（{"behavior": "allow", ...}）或配对命令
 """
 
 import asyncio
@@ -340,38 +339,39 @@ async def main():
                     print(f"[设备] 收到无效 JSON: {line}")
                     continue
 
-                # 控制消息（cmd 字段）
-                cmd = msg.get("cmd")
-                if cmd == "paired":
+                # 统一消息格式 {"type": "...", "data": {...}}
+                msg_type = msg.get("type")
+                data = msg.get("data", {})
+                if msg_type == "paired":
                     state.paired = True
-                    state.pairing_code = msg.get("pairing_code")
-                    state.session_id = msg.get("session_id")
+                    state.pairing_code = data.get("pairing_code")
+                    state.session_id = data.get("session_id")
                     sid = state.session_id[:8] if state.session_id else "?"
                     print(f"[设备] 配对成功! session: {sid}...")
                     print("[设备] 等待审批请求...")
-                elif cmd == "pairing_failed":
-                    print(f"[设备] 配对失败: {msg.get('reason', '未知原因')}")
+                elif msg_type == "pairing_failed":
+                    print(f"[设备] 配对失败: {data.get('reason', '未知原因')}")
                     print("[设备] 请重新输入配对码")
-                elif cmd == "waiting_pairing":
-                    print(f"[设备] {msg.get('message', '等待配对')}")
-                elif cmd == "session_end":
+                elif msg_type == "waiting_pairing":
+                    print(f"[设备] {data.get('message', '等待配对')}")
+                elif msg_type == "session_end":
                     state.paired = False
                     state.pairing_code = None
                     state.session_id = None
-                    sid = msg.get("session_id", "?")
+                    sid = data.get("session_id", "?")
                     print(f"[设备] 会话已结束 (session: {sid[:8] if len(sid) > 8 else sid}...)")
                     print("[设备] 请输入新的配对码")
-                elif "done" in msg:
+                elif msg_type == "done":
                     # 审批完成通知
-                    done_id = msg.get("id", "?")
+                    done_id = data.get("id", "?")
                     if state.pending_event and state.pending_event.get("tool_use_id") == done_id:
                         state.pending_event = None
-                    print(f"\n[设备] 审批已完成 (id={done_id}, decision={msg['done']})")
+                    print(f"\n[设备] 审批已完成 (id={done_id}, decision={data.get('decision')})")
                     print("[设备] 等待下一个审批请求...")
-                elif "hook_event_name" in msg or "tool_name" in msg:
-                    # 原始 CC 事件（审批请求）
-                    state.pending_event = msg
-                    _print_request(msg)
+                elif msg_type == "request":
+                    # 审批请求
+                    state.pending_event = data
+                    _print_request(data)
                 else:
                     print(f"[设备] 收到: {msg}")
 

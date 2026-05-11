@@ -330,7 +330,7 @@ class TestSuggestions:
         loop.close()
 
     def test_request_forwarded_to_device(self, bridge, mock_writer):
-        """验证审批请求直接透传原始事件给设备"""
+        """验证审批请求通过统一格式广播给设备"""
         async def run_test():
             await bridge._register_session("session-fwd", mock_writer)
             session = bridge._sessions["session-fwd"]
@@ -342,21 +342,18 @@ class TestSuggestions:
             session.paired_devices.add(device)
             device.session_id = "session-fwd"
 
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
             event = {"tool_name": "Bash", "tool_input": {"command": "ls"},
                      "permission_suggestions": [{"rules": [{"behavior": "allow", "toolName": "Bash"}]}]}
-            session.pending_request = PendingRequest(id="req-1", decision_future=fut, raw=event)
 
-            # 透传原始事件
-            await bridge._send_to_device(device, event)
+            await bridge._broadcast(session, "request", event)
 
             import json
             calls = mock_writer.write.call_args_list
             last_payload = calls[-1][0][0]
             msg = json.loads(last_payload.decode())
-            assert msg["tool_name"] == "Bash"
-            assert msg["permission_suggestions"] is not None
+            assert msg["type"] == "request"
+            assert msg["data"]["tool_name"] == "Bash"
+            assert msg["data"]["permission_suggestions"] is not None
 
         asyncio.run(run_test())
 

@@ -102,12 +102,14 @@ async def _read_json(reader: asyncio.StreamReader) -> dict | None:
 
 
 def _brief(msg: dict) -> str:
-    if "cmd" in msg:
-        return f"cmd={msg['cmd']}"
-    if "tool_name" in msg:
-        return f"request tool={msg['tool_name']} id={msg.get('tool_use_id','?')}"
-    if "done" in msg:
-        return f"done={msg['done']} id={msg.get('id','?')}"
+    t = msg.get("type", "")
+    d = msg.get("data", {})
+    if t == "waiting_pairing":
+        return "type=waiting_pairing"
+    if t == "request":
+        return f"type=request tool={d.get('tool_name')} id={d.get('tool_use_id','?')}"
+    if t == "done":
+        return f"type=done decision={d.get('decision')} id={d.get('id','?')}"
     return json.dumps(msg, ensure_ascii=False)[:100]
 
 
@@ -147,10 +149,11 @@ async def main():
 
     # 等待设备收到所有请求
     await asyncio.sleep(1.0)
-    requests_on_device = [m for m in dev_received if "tool_name" in m]
+    requests_on_device = [m for m in dev_received if m.get("type") == "request"]
     print(f"\n  设备收到的请求数: {len(requests_on_device)}")
     for r in requests_on_device:
-        print(f"    - {r.get('tool_name')} {r.get('tool_input', {}).get('command')} (id={r.get('tool_use_id')})")
+        d = r.get("data", {})
+        print(f"    - {d.get('tool_name')} {d.get('tool_input', {}).get('command')} (id={d.get('tool_use_id')})")
 
     # ── Step 4: 逐个审批（模拟设备发送决策）──────────
     print(f"\n[4] 设备逐个审批（bridge 控制推送节奏）")
@@ -158,20 +161,20 @@ async def main():
     for i in range(3):
         # 等待设备收到请求
         await asyncio.sleep(0.3)
-        req_msgs = [m for m in dev_received if "tool_name" in m]
+        req_msgs = [m for m in dev_received if m.get("type") == "request"]
         if i < len(req_msgs):
             req_msg = req_msgs[i]
         else:
             # 可能在 done 消息后才收到下一个请求
             await asyncio.sleep(0.5)
-            req_msgs = [m for m in dev_received if "tool_name" in m]
+            req_msgs = [m for m in dev_received if m.get("type") == "request"]
             req_msg = req_msgs[i] if i < len(req_msgs) else None
 
         if not req_msg:
             print(f"  等待请求 {i+1} 超时")
             continue
 
-        rid = req_msg.get("tool_use_id")
+        rid = req_msg.get("data", {}).get("tool_use_id")
         decision = {"behavior": "allow", "ccbb_request_id": rid}
         print(f"  审批 {rid}: {decision}")
         dev_writer.write((json.dumps(decision) + "\n").encode())
@@ -186,10 +189,11 @@ async def main():
 
     # ── Step 6: 验证 ───────────────────────────────────
     print(f"\n[6] 验证结果")
-    done_msgs = [m for m in dev_received if "done" in m]
+    done_msgs = [m for m in dev_received if m.get("type") == "done"]
     print(f"  设备收到的 done 消息数: {len(done_msgs)}")
     for d in done_msgs:
-        print(f"    - done={d['done']} id={d.get('id')}")
+        dd = d.get("data", {})
+        print(f"    - done decision={dd.get('decision')} id={dd.get('id')}")
 
     ok = True
     if len(requests_on_device) != 3:

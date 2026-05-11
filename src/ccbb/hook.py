@@ -23,6 +23,7 @@ import json
 import os
 import socket
 import sys
+import threading
 
 HOOK_HOST = os.environ.get("CCBB_TCP_HOST", "127.0.0.1")
 HOOK_PORT = int(os.environ.get("CCBB_TCP_PORT", "9876"))
@@ -51,6 +52,23 @@ def _connect_to_bridge() -> socket.socket | None:
 
 
 def _send_request(s: socket.socket, payload: bytes) -> dict | None:
+    # 后台监听 stdin：CC 审批后关闭 stdin → 关闭 socket → 解除 recv 阻塞
+    def _watch_stdin():
+        try:
+            while True:
+                data = os.read(sys.stdin.fileno(), 1)
+                if not data:
+                    break
+        except Exception:
+            pass
+        try:
+            s.close()
+        except OSError:
+            pass
+
+    watcher = threading.Thread(target=_watch_stdin, daemon=True)
+    watcher.start()
+
     try:
         s.sendall(payload)
         s.settimeout(READ_TIMEOUT)

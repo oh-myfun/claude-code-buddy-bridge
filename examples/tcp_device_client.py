@@ -273,8 +273,6 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
                         state.pending_event = None
                 except (ValueError, IndexError):
                     print("[设备] 无效的编号")
-                except (ValueError, IndexError):
-                    print("[设备] 无效的规则编号")
             elif cmd.lower() == 'd' and state.pending_event:
                 decision = {
                     "behavior": "deny",

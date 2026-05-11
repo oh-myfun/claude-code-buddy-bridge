@@ -48,7 +48,6 @@ def test_session_creation():
     assert session.pairing_code == "456789"
     assert session.paired_devices == set()
     assert session.pending_requests == {}
-    assert session.entries == []
 
 
 def test_device_connection_defaults():

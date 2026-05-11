@@ -40,25 +40,8 @@ from typing import Optional, Set, Dict
 # ── 常量 ───────────────────────────────────────────────────────────────────
 TCP_HOST_DEFAULT = "0.0.0.0"
 TCP_PORT_DEFAULT = 9876
-ENTRIES_MAX = 5
-HINT_MAX = 200
-_HINT_KEYS = ("command", "file_path", "url", "path", "pattern", "query", "prompt", "input")
 
 logger = logging.getLogger("ccbb.bridge")
-
-
-def _make_hint(tool_input: object) -> str:
-    """从 tool_input 中提取操作摘要"""
-    if not isinstance(tool_input, dict):
-        return str(tool_input)[:HINT_MAX]
-    for key in _HINT_KEYS:
-        val = tool_input.get(key)
-        if isinstance(val, str) and val:
-            return val[:HINT_MAX]
-    try:
-        return json.dumps(tool_input, separators=(",", ":"), ensure_ascii=False)[:HINT_MAX]
-    except Exception:
-        return str(tool_input)[:HINT_MAX]
 
 
 # ── 工具函数 ────────────────────────────────────────────────────────────────
@@ -79,7 +62,7 @@ def truncate(text: str, max_len: int = 60) -> str:
 class PendingRequest:
     id: str
     decision_future: asyncio.Future
-    raw: dict  # hook 发来的完整请求，透传给设备/web
+    raw: dict  # hook 发来的完整请求，透传给设备
 
 
 @dataclass
@@ -89,7 +72,6 @@ class Session:
     pairing_code: str
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_requests: Dict[str, PendingRequest] = field(default_factory=dict)
-    entries: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -387,6 +369,7 @@ class Bridge:
                 session_id = first_msg.get("session_id", "")
                 if session_id:
                     self._unregister_session(session_id)
+                return
 
             else:
                 # PermissionRequest
@@ -447,17 +430,12 @@ class Bridge:
         fut = loop.create_future()
         session.pending_requests[rid] = PendingRequest(id=rid, decision_future=fut, raw=event)
 
-        tool_name = event.get("tool_name") or "?"
-        hint = _make_hint(event.get("tool_input"))
-        session.entries.insert(0, f"{time.strftime('%H:%M')} {truncate(f'{tool_name}: {hint}', 50)}")
-        session.entries = session.entries[:ENTRIES_MAX]
-
         # 只有队首请求才推送，其余排队等待
         if len(session.pending_requests) == 1:
             logger.info(f"[审批] 推送请求 id={rid}")
             await self._broadcast(session, "request", event)
 
-        # 等待：设备/web 响应 或 hook 断开（超时由 Claude Code 管理）
+        # 等待：设备响应 或 hook 断开（超时由 Claude Code 管理）
         hook_disconnected = False
 
         async def _watch_hook():

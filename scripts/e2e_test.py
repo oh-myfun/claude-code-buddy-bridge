@@ -70,6 +70,10 @@ async def device_connect(session_id: str | None = None):
     """创建一个设备连接，返回 (reader, writer, 状态收集器)"""
     reader, writer = await asyncio.open_connection(HOST, PORT)
 
+    # 发送 hello 让 bridge 识别为设备
+    writer.write((json.dumps({"type": "hello", "data": {}}) + "\n").encode())
+    await writer.drain()
+
     # 读取欢迎消息
     welcome = await _read_json(reader)
     print(f"  [设备] 收到: {welcome}")
@@ -132,7 +136,7 @@ async def main():
     dev_reader, dev_writer, dev_received, dev_listen = await device_connect()
 
     # 配对
-    dev_writer.write((json.dumps({"cmd": "pair", "pairing_code": code}) + "\n").encode())
+    dev_writer.write((json.dumps({"type": "pair", "data": {"pairing_code": code}}) + "\n").encode())
     await dev_writer.drain()
 
     listen_task = asyncio.create_task(dev_listen())

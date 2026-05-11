@@ -260,13 +260,17 @@ function openStream() {
     const data = JSON.parse(e.data);
     if (data.id && data.id !== currentId) return;
     currentId = '';
-    // 已有新请求在显示 → 不覆盖
-    if ($('view-request').hidden === false) return;
-    $('done-text').textContent = '审批已完成: ' + (labels[data.decision] || data.decision);
-    buddy.setState('dizzy', {duration:2000, revertTo: buddy.baseState});
-    $('status-text').textContent = '等待下一个请求…';
+    $('status-text').textContent = '审批已完成: ' + (labels[data.decision] || data.decision);
+    $('done-text').textContent = $('status-text').textContent;
     showView('done');
-    setTimeout(() => showView('waiting'), 2000);
+    if (data.decision === 'allow') {
+      buddy.setState('heart', {duration:2000, revertTo:'celebrate'});
+      setTimeout(() => buddy.setState('celebrate', {duration:2000, revertTo: buddy.baseState}), 2000);
+    } else {
+      buddy.setState('dizzy', {duration:2000, revertTo: buddy.baseState});
+    }
+    // 2秒后切到waiting，但如果期间已有新请求显示则跳过
+    setTimeout(() => { if (!currentId) showView('waiting'); }, 2000);
   });
 
   evtSource.addEventListener('session_end', () => {
@@ -345,13 +349,7 @@ async function decide(behavior) {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
-    // 不切换视图 — SSE 的 done/request 事件会自动驱动界面
-    if (behavior === 'allow') {
-      buddy.setState('heart', {duration:2000, revertTo:'celebrate'});
-      setTimeout(() => buddy.setState('celebrate', {duration:2000, revertTo: buddy.baseState}), 2000);
-    } else {
-      buddy.setState('dizzy', {duration:2000, revertTo: buddy.baseState});
-    }
+    // 不切换视图/动画 — SSE 的 done 事件统一驱动
   } catch (e) {
     $('status-text').textContent = '发送失败: ' + e.message;
   }

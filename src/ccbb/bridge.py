@@ -10,7 +10,7 @@ ccbb.bridge — 守护进程核心
 
 配对机制：
 1. SessionStart hook 触发时，Bridge 注册会话并生成 6 位配对码
-2. Hook 将配对码显示在 Claude Code 终端
+2. Bridge 在 daemon 终端显示配对码
 3. 用户在设备上输入配对码完成配对
 4. 审批请求只发送给配对的设备，决策只返回给配对的 Hook
 5. SessionEnd hook 触发时清理配对并通知设备
@@ -50,11 +50,6 @@ logger = logging.getLogger("ccbb.bridge")
 def generate_pairing_code() -> str:
     """生成随机6位配对码"""
     return str(random.randint(100000, 999999))
-
-
-def truncate(text: str, max_len: int = 60) -> str:
-    """截断文本，保护设备显示。"""
-    return text[:max_len]
 
 
 # ── 数据结构 ────────────────────────────────────────────────────────────────

@@ -20,11 +20,12 @@ Fail-open 设计
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 
-HOOK_HOST = "127.0.0.1"
-HOOK_PORT = 9876
+HOOK_HOST = os.environ.get("CCBB_TCP_HOST", "127.0.0.1")
+HOOK_PORT = int(os.environ.get("CCBB_TCP_PORT", "9876"))
 
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
 READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）
@@ -34,18 +35,6 @@ READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120
 
 def _fail_open() -> None:
     """不输出任何内容，退出 0 → CC 走自己的权限对话框。"""
-    sys.exit(0)
-
-
-def _emit_deny(message: str) -> None:
-    out = {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionRequest",
-            "decision": {"behavior": "deny", "message": message},
-        }
-    }
-    sys.stdout.write(json.dumps(out, ensure_ascii=False))
-    sys.stdout.flush()
     sys.exit(0)
 
 

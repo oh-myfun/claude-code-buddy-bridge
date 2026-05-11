@@ -8,26 +8,10 @@ import pytest
 from ccbb.bridge import (
     Bridge,
     Session,
-    truncate,
     generate_pairing_code,
     DeviceConnection,
     PendingRequest,
 )
-
-
-def test_truncate_ascii_passthrough():
-    assert truncate("rm -rf /tmp/foo") == "rm -rf /tmp/foo"
-
-
-def test_truncate_preserves_unicode():
-    result = truncate("删除文件 /tmp/foo")
-    assert "删除" in result
-    assert "/tmp/foo" in result
-
-
-def test_truncate_truncates():
-    long_text = "a" * 200
-    assert len(truncate(long_text, max_len=60)) == 60
 
 
 def test_generate_pairing_code():
@@ -251,7 +235,6 @@ class TestBridgeSession:
             assert result is False
 
         asyncio.run(run_test())
-
 
 
 class TestQrCode:

@@ -43,7 +43,7 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 
 每个 Claude Code 会话独立配对：
 
-1. `SessionStart` hook 触发 → Bridge 注册会话并生成 6 位随机配对码 → hook 通过 stderr 显示醒目配对码
+1. `SessionStart` hook 触发 → Bridge 注册会话并生成 6 位随机配对码 → 在 daemon 终端显示醒目配对码
 2. 设备发送配对码 → Bridge 将设备绑定到该会话
 3. 审批请求只发送给配对的设备，设备决策只返回给配对的 Hook
 4. `SessionEnd` hook 触发 → Bridge 清理配对、通知设备会话已关闭

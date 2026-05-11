@@ -151,10 +151,10 @@ async def main():
         asyncio.create_task(hook_request(session_id, "Bash", "ls /opt", "req-003")),
     ]
 
-    # 等待设备收到所有请求
+    # bridge 只推队首，设备初始只收到 1 个请求
     await asyncio.sleep(1.0)
     requests_on_device = [m for m in dev_received if m.get("type") == "request"]
-    print(f"\n  设备收到的请求数: {len(requests_on_device)}")
+    print(f"\n  设备收到的请求数（队首推送）: {len(requests_on_device)}")
     for r in requests_on_device:
         d = r.get("data", {})
         print(f"    - {d.get('tool_name')} {d.get('tool_input', {}).get('command')} (id={d.get('tool_use_id')})")
@@ -193,6 +193,7 @@ async def main():
 
     # ── Step 6: 验证 ───────────────────────────────────
     print("\n[6] 验证结果")
+    all_requests = [m for m in dev_received if m.get("type") == "request"]
     done_msgs = [m for m in dev_received if m.get("type") == "done"]
     print(f"  设备收到的 done 消息数: {len(done_msgs)}")
     for d in done_msgs:
@@ -200,8 +201,8 @@ async def main():
         print(f"    - done decision={dd.get('decision')} id={dd.get('id')}")
 
     ok = True
-    if len(requests_on_device) != 3:
-        print(f"  FAIL: 设备应收到 3 个请求，实际 {len(requests_on_device)}")
+    if len(all_requests) != 3:
+        print(f"  FAIL: 设备应收到 3 个请求，实际 {len(all_requests)}")
         ok = False
     if len(done_msgs) != 3:
         print(f"  FAIL: 设备应收到 3 个 done，实际 {len(done_msgs)}")

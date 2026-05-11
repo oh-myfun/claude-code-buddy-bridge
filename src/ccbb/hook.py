@@ -23,13 +23,15 @@ import json
 import os
 import socket
 import sys
+import time
 
 
 HOOK_HOST = os.environ.get("CCBB_TCP_HOST", "127.0.0.1")
 HOOK_PORT = int(os.environ.get("CCBB_TCP_PORT", "9876"))
 
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
-READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）
+POLL_INTERVAL = 2.0    # 每次 recv 超时（秒），短间隔轮询以便快速感知 CC 终止
+MAX_WAIT = 118.0       # 总等待上限，必须小于 CC hook timeout（120s）
 
 
 # ── CC 协议输出 ────────────────────────────────────────────────────────────────
@@ -54,11 +56,20 @@ def _connect_to_bridge() -> socket.socket | None:
 def _send_request(s: socket.socket, payload: bytes) -> dict | None:
     try:
         s.sendall(payload)
-        s.settimeout(READ_TIMEOUT)
 
         buf = bytearray()
+        deadline = time.monotonic() + MAX_WAIT
+
         while b"\n" not in buf:
-            chunk = s.recv(4096)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            s.settimeout(min(POLL_INTERVAL, remaining))
+
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                continue
             if not chunk:
                 break
             buf.extend(chunk)
@@ -68,7 +79,7 @@ def _send_request(s: socket.socket, payload: bytes) -> dict | None:
             return None
 
         return json.loads(line.decode("utf-8"))
-    except (socket.timeout, OSError):
+    except OSError:
         return None
 
 

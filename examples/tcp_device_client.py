@@ -355,6 +355,9 @@ async def main():
                 elif msg_type == "pairing_failed":
                     print(f"[设备] 配对失败: {data.get('reason', '未知原因')}")
                     print("[设备] 请重新输入配对码")
+                elif msg_type == "pairing_pending":
+                    print(f"[设备] 预配对成功，等待会话启动 (code: {data.get('pairing_code')})")
+                    print("[设备] 请启动 Claude Code 会话...")
                 elif msg_type == "waiting_pairing":
                     print(f"[设备] {data.get('message', '等待配对')}")
                 elif msg_type == "session_end":

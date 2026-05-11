@@ -9,9 +9,9 @@ ccbb.bridge — 守护进程核心
   Claude Code 会话 B ──pairing_code_B── 设备 B
 
 配对机制：
-1. SessionStart hook 触发时，Bridge 注册会话并生成 6 位配对码
+1. SessionStart hook 触发时，Bridge 注册会话并从 session_id 派生 8 位配对码
 2. Bridge 在 daemon 终端显示配对码
-3. 用户在设备上输入配对码完成配对
+3. 用户在设备上输入配对码完成配对（支持设备先连接，CC 后启动的预配对）
 4. 审批请求只发送给配对的设备，决策只返回给配对的 Hook
 5. SessionEnd hook 触发时清理配对并通知设备
 
@@ -92,6 +92,7 @@ class Bridge:
     def __init__(self, host: str = "0.0.0.0", port: int = TCP_PORT_DEFAULT) -> None:
         self._sessions: Dict[str, Session] = {}  # session_id → Session
         self._pairing_index: Dict[str, str] = {}  # pairing_code → session_id
+        self._pending_pairings: Dict[str, Set[DeviceConnection]] = {}  # pairing_code → 等待该会话的设备
         self._unpaired_devices: Set[DeviceConnection] = set()
         self._host = host
         self._port = port
@@ -169,6 +170,27 @@ class Bridge:
         writer.write(json.dumps({"pairing_code": code}).encode() + b"\n")
         await writer.drain()
 
+        await self._auto_pair_pending(session)
+
+    async def _auto_pair_pending(self, session: Session) -> None:
+        """自动匹配预配对设备到新创建/恢复的 session"""
+        pending = self._pending_pairings.pop(session.pairing_code, None)
+        if not pending:
+            return
+        for dev in list(pending):
+            self._unpaired_devices.discard(dev)
+            session.paired_devices.add(dev)
+            dev.session_id = session.session_id
+            await self._send_to_device(dev, {
+                "type": "paired", "data": {"pairing_code": session.pairing_code, "session_id": session.session_id},
+            })
+            # 推送队首请求（如果有）
+            if session.pending_requests and not session.head_pushed:
+                first_req = next(iter(session.pending_requests.values()))
+                session.head_pushed = True
+                await self._send_to_device(dev, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
+        logger.info(f"[Session] {session.session_id[:8]}... 自动配对 {len(pending)} 个预配对设备")
+
     def _unregister_session(self, session_id: str) -> None:
         """清理会话，通知所有配对设备"""
         session = self._sessions.pop(session_id, None)
@@ -200,6 +222,10 @@ class Bridge:
         """移除断开的设备"""
         self._unpaired_devices.discard(device)
 
+        # 从预配对集合中移除
+        for pending_set in self._pending_pairings.values():
+            pending_set.discard(device)
+
         if device.session_id:
             session = self._sessions.get(device.session_id)
             if session:
@@ -212,14 +238,18 @@ class Bridge:
             pass
 
     async def _handle_pairing_request(self, device: DeviceConnection, pairing_code: str) -> bool:
-        """处理设备的配对请求"""
+        """处理设备的配对请求，支持 session 未启动时的预配对"""
         session_id = self._pairing_index.get(pairing_code.upper())
         if session_id is None:
+            # session 尚未启动，存为预配对
+            code_upper = pairing_code.upper()
+            pending_set = self._pending_pairings.setdefault(code_upper, set())
+            pending_set.add(device)
             await self._send_to_device(device, {
-                "type": "pairing_failed", "data": {"reason": "配对码无效或已过期"},
+                "type": "pairing_pending", "data": {"pairing_code": code_upper, "message": "等待会话启动"},
             })
-            logger.warning(f"[设备] {device.addr} 配对失败，无效配对码: {pairing_code}")
-            return False
+            logger.info(f"[设备] {device.addr} 预配对，等待 session {code_upper}...")
+            return True
 
         session = self._sessions.get(session_id)
         if session is None:
@@ -418,6 +448,7 @@ class Bridge:
             self._pairing_index[code] = session_id
             logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")
             self._print_pairing_banner(code, session_id)
+            await self._auto_pair_pending(session)
 
         rid = f"req_{uuid.uuid4().hex[:12]}"
         logger.info(f"[审批] 收到请求 session={session_id[:8]}... id={rid}")

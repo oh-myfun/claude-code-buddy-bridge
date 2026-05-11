@@ -66,6 +66,7 @@ def test_bridge_initial_state():
     bridge = Bridge()
     assert bridge._sessions == {}
     assert bridge._pairing_index == {}
+    assert bridge._pending_pairings == {}
     assert bridge._unpaired_devices == set()
 
 
@@ -223,7 +224,8 @@ class TestBridgeSession:
 
         asyncio.run(run_test())
 
-    def test_handle_pairing_wrong_code(self, bridge, mock_writer):
+    def test_handle_pairing_unknown_code_stores_pending(self, bridge, mock_writer):
+        """无效配对码 → 存为预配对（等待 session 注册）"""
         async def run_test():
             device = DeviceConnection(
                 reader=MagicMock(), writer=mock_writer,
@@ -231,9 +233,89 @@ class TestBridgeSession:
             )
             bridge._unpaired_devices.add(device)
 
-            result = await bridge._handle_pairing_request(device, "000000")
+            result = await bridge._handle_pairing_request(device, "00000000")
 
-            assert result is False
+            assert result is True
+            assert "00000000" in bridge._pending_pairings
+            assert device in bridge._pending_pairings["00000000"]
+
+        asyncio.run(run_test())
+
+    def test_pre_pairing_device_before_session(self, bridge, mock_writer):
+        """设备先配对，CC 会话后启动时自动匹配"""
+        async def run_test():
+            device = DeviceConnection(
+                reader=MagicMock(), writer=mock_writer,
+                addr=("127.0.0.1", 12345), uid="device-pre",
+            )
+            bridge._unpaired_devices.add(device)
+
+            # 设备先发送配对码（session 尚未注册）
+            result = await bridge._handle_pairing_request(device, "AABB1122")
+            assert result is True
+            assert "AABB1122" in bridge._pending_pairings
+            assert device in bridge._pending_pairings["AABB1122"]
+
+            # CC 会话启动 → 自动配对
+            await bridge._register_session("aabb1122-session-pre", mock_writer)
+            session = bridge._sessions.get("aabb1122-session-pre")
+            assert session is not None
+            assert device in session.paired_devices
+            assert device.session_id == "aabb1122-session-pre"
+            assert "AABB1122" not in bridge._pending_pairings
+
+        asyncio.run(run_test())
+
+    def test_pre_pairing_multiple_devices(self, bridge, mock_writer):
+        """多个设备预配对，CC 启动时全部自动匹配"""
+        async def run_test():
+            dev1 = DeviceConnection(
+                reader=MagicMock(), writer=mock_writer,
+                addr=("127.0.0.1", 12345), uid="dev-pre1",
+            )
+            dev2 = DeviceConnection(
+                reader=MagicMock(), writer=mock_writer,
+                addr=("127.0.0.1", 12346), uid="dev-pre2",
+            )
+            bridge._unpaired_devices.add(dev1)
+            bridge._unpaired_devices.add(dev2)
+
+            await bridge._handle_pairing_request(dev1, "CCDD3344")
+            await bridge._handle_pairing_request(dev2, "CCDD3344")
+
+            await bridge._register_session("ccdd3344-session-multi", mock_writer)
+            session = bridge._sessions["ccdd3344-session-multi"]
+            assert len(session.paired_devices) == 2
+            assert dev1 in session.paired_devices
+            assert dev2 in session.paired_devices
+
+        asyncio.run(run_test())
+
+    def test_pre_pairing_auto_recovery(self, bridge, mock_writer):
+        """PermissionRequest 触发自动恢复时，预配对设备也应被匹配"""
+        async def run_test():
+            device = DeviceConnection(
+                reader=MagicMock(), writer=mock_writer,
+                addr=("127.0.0.1", 12345), uid="device-recovery",
+            )
+            bridge._unpaired_devices.add(device)
+
+            # 设备先配对
+            await bridge._handle_pairing_request(device, "EEFF5566")
+            assert "EEFF5566" in bridge._pending_pairings
+
+            # PermissionRequest 触发自动恢复（不走 session_start）
+            event = {"session_id": "eeff5566-session-recovery", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+            # 需要一个 reader mock 来处理 _watch_hook
+            mock_reader = MagicMock()
+            mock_reader.read = AsyncMock(return_value=b"")
+            await bridge._process_permission_request(event, mock_writer, mock_reader)
+
+            session = bridge._sessions.get("eeff5566-session-recovery")
+            assert session is not None
+            assert device in session.paired_devices
+            assert device.session_id == "eeff5566-session-recovery"
+            assert "EEFF5566" not in bridge._pending_pairings
 
         asyncio.run(run_test())
 

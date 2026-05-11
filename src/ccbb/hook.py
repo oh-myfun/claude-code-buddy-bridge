@@ -28,45 +28,12 @@ HOOK_PORT = 9876
 
 CONNECT_TIMEOUT = 1.0  # 连接超时（秒）
 READ_TIMEOUT = 115.0   # 等待决策超时，必须小于 CC hook timeout（120s）
-HINT_MAX = 200
-
-# 按优先级依次尝试提取操作摘要的字段
-_HINT_KEYS = ("command", "file_path", "url", "path", "pattern", "query", "prompt", "input")
-
-
-def _make_hint(tool_input: object) -> str:
-    """从 tool_input 中提取最有意义的摘要字符串。"""
-    if not isinstance(tool_input, dict):
-        return str(tool_input)[:HINT_MAX]
-    for key in _HINT_KEYS:
-        val = tool_input.get(key)
-        if isinstance(val, str) and val:
-            return val[:HINT_MAX]
-    try:
-        return json.dumps(tool_input, separators=(",", ":"), ensure_ascii=False)[:HINT_MAX]
-    except Exception:
-        return str(tool_input)[:HINT_MAX]
 
 
 # ── CC 协议输出 ────────────────────────────────────────────────────────────────
 
 def _fail_open() -> None:
     """不输出任何内容，退出 0 → CC 走自己的权限对话框。"""
-    sys.exit(0)
-
-
-def _emit_allow(updated_permissions: list | None = None) -> None:
-    decision: dict = {"behavior": "allow"}
-    if updated_permissions:
-        decision["updatedPermissions"] = updated_permissions
-    out: dict = {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionRequest",
-            "decision": decision,
-        }
-    }
-    sys.stdout.write(json.dumps(out, ensure_ascii=False))
-    sys.stdout.flush()
     sys.exit(0)
 
 

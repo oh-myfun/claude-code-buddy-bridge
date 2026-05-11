@@ -13,7 +13,7 @@ import json
 import sys
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -128,7 +128,7 @@ def _print_request(event: dict) -> None:
         print("  输入编号回答（多选用逗号或空格分隔），[D]拒绝  [C]查看原始数据")
     else:
         if suggestions:
-            print(f"\n  可记住规则:")
+            print("\n  可记住规则:")
             print(_format_suggestions(suggestions))
         print(f"{'=' * 60}")
         opts = "[A]允许  [D]拒绝  [C]查看原始数据"

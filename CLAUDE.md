@@ -51,8 +51,8 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 ### 连接识别
 
 通过首条消息自动区分连接类型：
-- `type` 字段为 `hello`/`pair`/`decision` → 设备连接
-- 含 `hook_event_name`、`action`（`session_start`/`session_end`）、`tool_name` 或 `session_id` 字段 → Hook 连接
+- `type` 字段为 `hello`/`pair`/`decision` → 设备连接（优先判断）
+- 含 `hook_event_name`、`action`（`session_start`/`session_end`）或 `tool_name` 字段 → Hook 连接
 
 ### 消息协议
 
@@ -77,7 +77,10 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 
 **Hook → Bridge：** `{"action":"session_start","session_id":"..."}`、`{"session_id":"...","tool_name":"...","tool_input":{...},"tool_use_id":"..."}`、`{"action":"session_end","session_id":"..."}`
 
-**Bridge → Hook 响应：** `{"behavior":"allow","ccbb_request_id":"..."}` 或超时返回 `{"behavior":"closed"}`
+**Bridge → Hook 响应：**
+- SessionStart: `{"pairing_code":"123456"}`
+- PermissionRequest: `{"behavior":"allow","ccbb_request_id":"..."}` 或超时返回 `{"behavior":"closed"}`
+- SessionEnd: 无响应（fire-and-forget）
 
 ## 提交规范
 

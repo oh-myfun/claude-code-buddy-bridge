@@ -481,9 +481,8 @@ class Bridge:
     def _is_hook_request(self, msg: dict) -> bool:
         return (
             msg.get("hook_event_name") is not None
-            or msg.get("action") in ("session_start", "session_end", "get_pairing_code")
+            or msg.get("action") in ("session_start", "session_end")
             or "tool_name" in msg
-            or "session_id" in msg
         )
 
     def _is_device_message(self, msg: dict) -> bool:

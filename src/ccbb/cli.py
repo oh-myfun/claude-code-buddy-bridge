@@ -195,7 +195,6 @@ def main() -> None:
         "--tools", nargs="+", metavar="TOOL",
         help="限定拦截的工具名（默认拦截所有工具）。例: --tools Bash Write",
     )
-    p_install.add_argument("--force", action="store_true", help="强制覆盖已有配置")
     p_install.set_defaults(func=cmd_install)
 
     p_uninstall = sub.add_parser("uninstall", help="移除 Claude Code hook 配置")

@@ -132,7 +132,7 @@ async def main():
     print(f"  配对码: {code}")
 
     # ── Step 2: 设备连接并配对 ──────────────────────────
-    print(f"\n[2] 设备连接并配对")
+    print("\n[2] 设备连接并配对")
     dev_reader, dev_writer, dev_received, dev_listen = await device_connect()
 
     # 配对
@@ -144,7 +144,7 @@ async def main():
     await asyncio.sleep(0.5)
 
     # ── Step 3: 发送 3 个并发的 PermissionRequest ───────
-    print(f"\n[3] 发送 3 个并发 PermissionRequest")
+    print("\n[3] 发送 3 个并发 PermissionRequest")
     tasks = [
         asyncio.create_task(hook_request(session_id, "Bash", "ls /tmp", "req-001")),
         asyncio.create_task(hook_request(session_id, "Bash", "ls /var", "req-002")),
@@ -160,7 +160,7 @@ async def main():
         print(f"    - {d.get('tool_name')} {d.get('tool_input', {}).get('command')} (id={d.get('tool_use_id')})")
 
     # ── Step 4: 逐个审批（模拟设备发送决策）──────────
-    print(f"\n[4] 设备逐个审批（bridge 控制推送节奏）")
+    print("\n[4] 设备逐个审批（bridge 控制推送节奏）")
 
     for i in range(3):
         # 等待设备收到请求
@@ -186,13 +186,13 @@ async def main():
         await asyncio.sleep(0.5)
 
     # ── Step 5: 等待所有 hook 收到响应 ──────────────────
-    print(f"\n[5] 等待 hook 响应")
+    print("\n[5] 等待 hook 响应")
     results = await asyncio.gather(*tasks)
     for i, r in enumerate(results):
         print(f"  hook-{i+1}: {r}")
 
     # ── Step 6: 验证 ───────────────────────────────────
-    print(f"\n[6] 验证结果")
+    print("\n[6] 验证结果")
     done_msgs = [m for m in dev_received if m.get("type") == "done"]
     print(f"  设备收到的 done 消息数: {len(done_msgs)}")
     for d in done_msgs:
@@ -207,7 +207,7 @@ async def main():
         print(f"  FAIL: 设备应收到 3 个 done，实际 {len(done_msgs)}")
         ok = False
     if len([r for r in results if r and r.get("behavior") == "allow"]) != 3:
-        print(f"  FAIL: 3 个 hook 都应收到 allow")
+        print("  FAIL: 3 个 hook 都应收到 allow")
         ok = False
 
     if ok:
@@ -226,7 +226,7 @@ async def main():
 
     # 结束 session
     await tcp_exchange({"action": "session_end", "session_id": session_id}, read_timeout=1.0)
-    print(f"\n  Session 已清理")
+    print("\n  Session 已清理")
 
     return 0 if ok else 1
 

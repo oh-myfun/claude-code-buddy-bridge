@@ -86,7 +86,7 @@ def test_is_hook_request():
     assert bridge._is_hook_request({"tool_name": "Bash"})
     assert bridge._is_hook_request({"action": "session_start"})
     assert bridge._is_hook_request({"action": "session_end"})
-    assert bridge._is_hook_request({"session_id": "abc123"})
+    assert not bridge._is_hook_request({"session_id": "abc123"})
     assert not bridge._is_hook_request({"cmd": "permission"})
     assert not bridge._is_hook_request({"cmd": "hello"})
 
@@ -252,29 +252,6 @@ class TestBridgeSession:
 
         asyncio.run(run_test())
 
-
-class TestHookFunctions:
-    def test_make_hint_command(self):
-        from ccbb.hook import _make_hint
-        assert _make_hint({"command": "ls -la", "other": "ignored"}) == "ls -la"
-
-    def test_make_hint_file_path(self):
-        from ccbb.hook import _make_hint
-        assert _make_hint({"file_path": "/etc/hosts"}) == "/etc/hosts"
-
-    def test_make_hint_fallback_json(self):
-        from ccbb.hook import _make_hint
-        result = _make_hint({"unknown_key": "value"})
-        assert "unknown_key" in result
-
-    def test_make_hint_non_dict(self):
-        from ccbb.hook import _make_hint
-        assert _make_hint("raw string") == "raw string"
-
-    def test_make_hint_truncated(self):
-        from ccbb.hook import _make_hint, HINT_MAX
-        long_val = "x" * 300
-        assert len(_make_hint({"command": long_val})) == HINT_MAX
 
 
 class TestQrCode:

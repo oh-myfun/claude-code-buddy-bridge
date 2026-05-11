@@ -67,6 +67,7 @@ class Session:
     pairing_code: str
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_requests: Dict[str, PendingRequest] = field(default_factory=dict)
+    head_pushed: bool = False
 
 
 @dataclass
@@ -334,7 +335,6 @@ class Bridge:
 
         if req and not req.decision_future.done():
             req.decision_future.set_result(decision)
-            session.pending_requests.pop(rid, None)
             return rid
         return None
 
@@ -388,15 +388,6 @@ class Bridge:
             except Exception:
                 pass
 
-    async def _push_next_request(self, session: Session) -> None:
-        """推送队列中下一个待处理请求到所有订阅者"""
-        if not session.pending_requests:
-            return
-        rid = next(iter(session.pending_requests))
-        req = session.pending_requests[rid]
-        logger.info(f"[审批] 推送下一个请求 id={rid}")
-        await self._broadcast(session, "request", req.raw)
-
     async def _process_permission_request(self, event: dict, writer: asyncio.StreamWriter,
                                            reader: asyncio.StreamReader) -> None:
         """处理审批请求：队首时推送，等待决策后推送下一个"""
@@ -425,8 +416,9 @@ class Bridge:
         fut = loop.create_future()
         session.pending_requests[rid] = PendingRequest(id=rid, decision_future=fut, raw=event)
 
-        # 只有队首请求才推送，其余排队等待
-        if len(session.pending_requests) == 1:
+        # 队首且尚未推送时才推送
+        if not session.head_pushed:
+            session.head_pushed = True
             logger.info(f"[审批] 推送请求 id={rid}")
             await self._broadcast(session, "request", event)
 
@@ -461,8 +453,13 @@ class Bridge:
         behavior = result.get("behavior", "closed") if isinstance(result, dict) else (result or "closed")
         await self._broadcast(session, "done", {"id": rid, "decision": behavior})
 
-        # 推送队列中的下一个请求
-        await self._push_next_request(session)
+        # 推送队列中下一个请求（同步重置标志后再 await，防止竞态）
+        session.head_pushed = False
+        if session.pending_requests:
+            next_req = next(iter(session.pending_requests.values()))
+            session.head_pushed = True
+            logger.info(f"[审批] 推送下一个请求 id={next_req.id}")
+            await self._broadcast(session, "request", next_req.raw)
 
         # 响应 Hook（透传 decision 对象，hook 断开则跳过）
         if not hook_disconnected:

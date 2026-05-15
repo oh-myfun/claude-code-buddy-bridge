@@ -443,8 +443,10 @@ async def main():
                     state.paired = True
                     state.pairing_code = data.get("pairing_code")
                     state.session_id = data.get("session_id")
+                    project = data.get("project", "")
                     sid = state.session_id[:8] if state.session_id else "?"
-                    print(f"[设备] 配对成功! session: {sid}...")
+                    project_info = f"  项目: {project}" if project else ""
+                    print(f"[设备] 配对成功! session: {sid}...{project_info}")
                     print("[设备] 等待审批请求...")
                 elif msg_type == "pairing_failed":
                     print(f"[设备] 配对失败: {data.get('reason', '未知原因')}")

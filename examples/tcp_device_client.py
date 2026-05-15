@@ -471,6 +471,22 @@ async def main():
                     # 审批请求
                     state.pending_event = data
                     _print_request(data)
+                elif msg_type == "status":
+                    cc_state = data.get("state", "?")
+                    if cc_state == "running":
+                        prompt = data.get("prompt", "")
+                        hint = f" — {prompt}" if prompt else ""
+                        print(f"\n[CC] ▶ 开始工作{hint}")
+                    elif cc_state == "idle":
+                        msg = data.get("message", "")
+                        hint = f" — {msg}" if msg else ""
+                        print(f"\n[CC] ■ 空闲{hint}")
+                    elif cc_state == "error":
+                        msg = data.get("message", "")
+                        hint = f" — {msg}" if msg else ""
+                        print(f"\n[CC] ✖ 异常停止{hint}")
+                    else:
+                        print(f"\n[CC] 状态: {data}")
                 else:
                     print(f"[设备] 收到: {msg}")
 

@@ -445,6 +445,13 @@ class Bridge:
                     self._unregister_session(session_id)
                 return
 
+            elif action == "status":
+                session_id = first_msg.get("session_id", "")
+                status = first_msg.get("status", {})
+                if session_id and status:
+                    self._broadcast_status(session_id, status)
+                return
+
             else:
                 # PermissionRequest
                 session_id = first_msg.get("session_id", "")
@@ -466,6 +473,15 @@ class Bridge:
                 await self._send_to_device(dev, msg)
             except Exception:
                 pass
+
+    def _broadcast_status(self, session_id: str, status: dict) -> None:
+        """广播 CC 状态变化到配对设备（同步 fire-and-forget）"""
+        session = self._sessions.get(session_id)
+        if not session or not session.paired_devices:
+            return
+        state = status.get("state", "?")
+        asyncio.ensure_future(self._broadcast(session, "status", status))
+        logger.info(f"[状态] session={session_id[:8]}... state={state}")
 
     async def _process_permission_request(self, event: dict, writer: asyncio.StreamWriter,
                                            reader: asyncio.StreamReader) -> None:

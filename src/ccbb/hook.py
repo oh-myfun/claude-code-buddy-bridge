@@ -144,6 +144,63 @@ def _handle_session_end(event: dict) -> None:
     sys.exit(0)
 
 
+# ── Status (UserPromptSubmit / Stop / StopFailure) ─────────────────────────
+
+def _fire_status(event: dict, state: str) -> None:
+    """向 bridge 发送 CC 状态变化（fire-and-forget）"""
+    session_id = event.get("session_id", "")
+    if not session_id:
+        sys.exit(0)
+
+    s = _connect_to_bridge()
+    if not s:
+        sys.exit(0)
+
+    try:
+        s.settimeout(1.0)
+        status_data: dict = {"state": state}
+        if state == "running":
+            prompt = event.get("prompt", "")
+            if prompt:
+                status_data["prompt"] = prompt[:200]
+        elif state == "idle":
+            msg = event.get("last_assistant_message", "")
+            if msg:
+                status_data["message"] = msg[:200]
+        elif state == "error":
+            msg = event.get("error_message", "")
+            if msg:
+                status_data["message"] = msg[:200]
+
+        payload = (json.dumps({
+            "action": "status",
+            "session_id": session_id,
+            "status": status_data,
+        }) + "\n").encode("utf-8")
+        s.sendall(payload)
+    except Exception:
+        pass
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+    sys.exit(0)
+
+
+def _handle_user_prompt_submit(event: dict) -> None:
+    _fire_status(event, "running")
+
+
+def _handle_stop(event: dict) -> None:
+    _fire_status(event, "idle")
+
+
+def _handle_stop_failure(event: dict) -> None:
+    _fire_status(event, "error")
+
+
 # ── PermissionRequest ──────────────────────────────────────────────────────
 
 def _handle_permission_request(event: dict) -> None:
@@ -199,6 +256,12 @@ def main() -> None:
         _handle_session_end(event)
     elif hook_event == "PermissionRequest":
         _handle_permission_request(event)
+    elif hook_event == "UserPromptSubmit":
+        _handle_user_prompt_submit(event)
+    elif hook_event == "Stop":
+        _handle_stop(event)
+    elif hook_event == "StopFailure":
+        _handle_stop_failure(event)
     else:
         _fail_open()
 

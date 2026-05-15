@@ -84,6 +84,9 @@ def cmd_install(args: argparse.Namespace) -> None:
     session_start_hooks = hooks_block.setdefault("SessionStart", [])
     permission_hooks = hooks_block.setdefault("PermissionRequest", [])
     session_end_hooks = hooks_block.setdefault("SessionEnd", [])
+    prompt_submit_hooks = hooks_block.setdefault("UserPromptSubmit", [])
+    stop_hooks = hooks_block.setdefault("Stop", [])
+    stop_failure_hooks = hooks_block.setdefault("StopFailure", [])
 
     def is_ccbb_entry(entry: dict) -> bool:
         return any(
@@ -95,12 +98,19 @@ def cmd_install(args: argparse.Namespace) -> None:
     session_start_hooks[:] = [e for e in session_start_hooks if not is_ccbb_entry(e)]
     permission_hooks[:] = [e for e in permission_hooks if not is_ccbb_entry(e)]
     session_end_hooks[:] = [e for e in session_end_hooks if not is_ccbb_entry(e)]
+    prompt_submit_hooks[:] = [e for e in prompt_submit_hooks if not is_ccbb_entry(e)]
+    stop_hooks[:] = [e for e in stop_hooks if not is_ccbb_entry(e)]
+    stop_failure_hooks[:] = [e for e in stop_failure_hooks if not is_ccbb_entry(e)]
 
     session_start_entry = {"hooks": [hook_entry]}
     session_start_hooks.append(session_start_entry)
 
     session_end_entry = {"hooks": [hook_entry]}
     session_end_hooks.append(session_end_entry)
+
+    prompt_submit_hooks.append({"hooks": [hook_entry]})
+    stop_hooks.append({"hooks": [hook_entry]})
+    stop_failure_hooks.append({"hooks": [hook_entry]})
 
     matchers = args.tools if args.tools else [""]
     for matcher in matchers:
@@ -118,6 +128,9 @@ def cmd_install(args: argparse.Namespace) -> None:
     print("  SessionStart hook: 已添加（用于显示配对码）")
     print("  SessionEnd hook: 已添加（用于清理配对）")
     print(f"  PermissionRequest hook: 覆盖范围: {'所有工具' if not args.tools else ', '.join(args.tools)}")
+    print("  UserPromptSubmit hook: 已添加（CC 开始工作时通知设备）")
+    print("  Stop hook: 已添加（CC 空闲时通知设备）")
+    print("  StopFailure hook: 已添加（CC 异常停止时通知设备）")
     print()
     print("下一步：")
     print("  1. 运行 'ccbb daemon' 启动守护进程")
@@ -147,7 +160,8 @@ def cmd_uninstall(_args: argparse.Namespace) -> None:
         )
 
     removed = 0
-    for hook_type in ["SessionStart", "PermissionRequest", "SessionEnd"]:
+    for hook_type in ["SessionStart", "PermissionRequest", "SessionEnd",
+                       "UserPromptSubmit", "Stop", "StopFailure"]:
         hooks_list = hooks_block.get(hook_type, [])
         before = len(hooks_list)
         hooks_list[:] = [e for e in hooks_list if not is_ccbb_entry(e)]

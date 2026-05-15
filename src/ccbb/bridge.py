@@ -476,7 +476,7 @@ class Bridge:
                 session_id = first_msg.get("session_id", "")
                 status = first_msg.get("status", {})
                 if session_id and status:
-                    self._broadcast_status(session_id, status)
+                    self._broadcast_status(session_id, status, cwd=first_msg.get("cwd", ""))
                 return
 
             else:
@@ -501,11 +501,13 @@ class Bridge:
             except Exception:
                 pass
 
-    def _broadcast_status(self, session_id: str, status: dict) -> None:
+    def _broadcast_status(self, session_id: str, status: dict, *, cwd: str = "") -> None:
         """广播 CC 状态变化到配对设备（同步 fire-and-forget）"""
         session = self._sessions.get(session_id)
         if not session or not session.paired_devices:
             return
+        if cwd and not session.project_name:
+            session.project_name = self._extract_project_name(cwd)
         state = status.get("state", "?")
         asyncio.ensure_future(self._broadcast(session, "status", status))
         logger.info(f"[状态] session={session_id[:8]}... state={state}")
@@ -522,7 +524,8 @@ class Bridge:
         if session is None:
             # daemon 重启后 session 丢失，自动恢复注册
             code = derive_pairing_code(session_id)
-            session = Session(session_id=session_id, pairing_code=code)
+            project_name = self._extract_project_name(event.get("cwd", ""))
+            session = Session(session_id=session_id, pairing_code=code, project_name=project_name)
             self._sessions[session_id] = session
             self._pairing_index[code] = session_id
             logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")

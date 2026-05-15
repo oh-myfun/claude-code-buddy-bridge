@@ -176,11 +176,15 @@ def _fire_status(event: dict, state: str) -> None:
             if msg:
                 status_data["message"] = msg[:200]
 
-        payload = (json.dumps({
+        payload_data: dict = {
             "action": "status",
             "session_id": session_id,
             "status": status_data,
-        }) + "\n").encode("utf-8")
+        }
+        cwd = event.get("cwd", "")
+        if cwd:
+            payload_data["cwd"] = cwd
+        payload = (json.dumps(payload_data) + "\n").encode("utf-8")
         s.sendall(payload)
     except Exception:
         pass

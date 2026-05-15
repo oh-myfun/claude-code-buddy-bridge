@@ -476,7 +476,8 @@ class Bridge:
                 session_id = first_msg.get("session_id", "")
                 status = first_msg.get("status", {})
                 if session_id and status:
-                    self._broadcast_status(session_id, status, cwd=first_msg.get("cwd", ""))
+                    await self._ensure_session(session_id, cwd=first_msg.get("cwd", ""))
+                    self._broadcast_status(session_id, status)
                 return
 
             else:
@@ -501,8 +502,26 @@ class Bridge:
             except Exception:
                 pass
 
+    async def _ensure_session(self, session_id: str, *, cwd: str = "") -> Optional[Session]:
+        """获取 session，不存在则自动恢复注册"""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            if cwd and not session.project_name:
+                session.project_name = self._extract_project_name(cwd)
+            return session
+
+        code = derive_pairing_code(session_id)
+        project_name = self._extract_project_name(cwd)
+        session = Session(session_id=session_id, pairing_code=code, project_name=project_name)
+        self._sessions[session_id] = session
+        self._pairing_index[code] = session_id
+        logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code} 项目={project_name}")
+        self._print_pairing_banner(code, session_id, project_name)
+        await self._auto_pair_pending(session)
+        return session
+
     def _broadcast_status(self, session_id: str, status: dict, *, cwd: str = "") -> None:
-        """广播 CC 状态变化到配对设备（同步 fire-and-forget）"""
+        """广播 CC 状态变化到配对设备（fire-and-forget）"""
         session = self._sessions.get(session_id)
         if not session or not session.paired_devices:
             return
@@ -520,17 +539,7 @@ class Bridge:
             logger.warning("PermissionRequest 缺少 session_id")
             return
 
-        session = self._sessions.get(session_id)
-        if session is None:
-            # daemon 重启后 session 丢失，自动恢复注册
-            code = derive_pairing_code(session_id)
-            project_name = self._extract_project_name(event.get("cwd", ""))
-            session = Session(session_id=session_id, pairing_code=code, project_name=project_name)
-            self._sessions[session_id] = session
-            self._pairing_index[code] = session_id
-            logger.info(f"[Session] 自动恢复 {session_id[:8]}... 配对码={code}")
-            self._print_pairing_banner(code, session_id)
-            await self._auto_pair_pending(session)
+        session = await self._ensure_session(session_id, cwd=event.get("cwd", ""))
 
         rid = f"req_{uuid.uuid4().hex[:12]}"
         logger.info(f"[审批] 收到请求 session={session_id[:8]}... id={rid}")

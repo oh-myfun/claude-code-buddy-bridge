@@ -64,6 +64,7 @@ class Session:
     """一个 Claude Code 会话"""
     session_id: str
     pairing_code: str
+    project_name: str = ""
     paired_devices: Set["DeviceConnection"] = field(default_factory=set)
     pending_requests: Dict[str, PendingRequest] = field(default_factory=dict)
     head_pushed: bool = False
@@ -102,7 +103,7 @@ class Bridge:
     def get_discovery_info(self, peer_addr: tuple) -> dict:
         """构建 UDP 发现响应"""
         sessions = [
-            {"session_id": sid, "pairing_code": s.pairing_code}
+            {"session_id": sid, "pairing_code": s.pairing_code, "project": s.project_name}
             for sid, s in self._sessions.items()
         ]
         return {
@@ -134,6 +135,11 @@ class Bridge:
             w += 2 if eaw in ("W", "F") else 1
         return w
 
+    @staticmethod
+    def _extract_project_name(cwd: str) -> str:
+        """从 cwd 路径提取项目目录名"""
+        return cwd.replace("\\", "/").rstrip("/").split("/")[-1] if cwd else ""
+
     def _pad_center(self, s: str, width: int) -> str:
         """按显示宽度居中填充"""
         sw = self._display_width(s)
@@ -143,7 +149,7 @@ class Bridge:
         left = pad // 2
         return " " * left + s + " " * (pad - left)
 
-    def _print_pairing_banner(self, pairing_code: str, session_id: str) -> None:
+    def _print_pairing_banner(self, pairing_code: str, session_id: str, project_name: str = "") -> None:
         """在 daemon 终端显示醒目的配对码"""
         spaced_code = "  ".join(pairing_code)
         sid_short = session_id[:8] if len(session_id) > 8 else session_id
@@ -153,6 +159,10 @@ class Bridge:
             "",
             "╔" + "═" * w + "╗",
             "║" + self._pad_center(f"Session: {sid_short}", w) + "║",
+        ]
+        if project_name:
+            lines.append("║" + self._pad_center(f"Project: {project_name}", w) + "║")
+        lines += [
             "║" + "═" * w + "║",
             "║" + self._pad_center(spaced_code, w) + "║",
             "║" + "═" * w + "║",
@@ -177,24 +187,28 @@ class Bridge:
 
     # ── 会话管理 ────────────────────────────────────────────────────────────
 
-    async def _register_session(self, session_id: str, writer: asyncio.StreamWriter) -> None:
+    async def _register_session(self, session_id: str, writer: asyncio.StreamWriter,
+                                 *, cwd: str = "") -> None:
         """注册 CC 会话，返回配对码"""
         if session_id in self._sessions:
             # 会话已存在（resume），返回现有配对码
             session = self._sessions[session_id]
+            if cwd and not session.project_name:
+                session.project_name = self._extract_project_name(cwd)
             writer.write(json.dumps({"pairing_code": session.pairing_code}).encode() + b"\n")
             await writer.drain()
             logger.info(f"[Session] 恢复 {session_id[:8]}... 配对码={session.pairing_code}")
             return
 
         code = derive_pairing_code(session_id)
+        project_name = self._extract_project_name(cwd) if cwd else ""
 
-        session = Session(session_id=session_id, pairing_code=code)
+        session = Session(session_id=session_id, pairing_code=code, project_name=project_name)
         self._sessions[session_id] = session
         self._pairing_index[code] = session_id
-        logger.info(f"[Session] 注册 {session_id[:8]}... 配对码={code}")
+        logger.info(f"[Session] 注册 {session_id[:8]}... 配对码={code} 项目={project_name}")
 
-        self._print_pairing_banner(code, session_id)
+        self._print_pairing_banner(code, session_id, project_name)
 
         writer.write(json.dumps({"pairing_code": code}).encode() + b"\n")
         await writer.drain()
@@ -442,7 +456,7 @@ class Bridge:
             if action == "session_start":
                 session_id = first_msg.get("session_id", "")
                 if session_id:
-                    await self._register_session(session_id, writer)
+                    await self._register_session(session_id, writer, cwd=first_msg.get("cwd", ""))
 
             elif action == "session_end":
                 session_id = first_msg.get("session_id", "")

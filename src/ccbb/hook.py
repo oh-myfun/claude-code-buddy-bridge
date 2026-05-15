@@ -98,10 +98,14 @@ def _handle_session_start(event: dict) -> None:
         return
 
     try:
-        payload = (json.dumps({
+        payload_data: dict = {
             "action": "session_start",
             "session_id": session_id,
-        }) + "\n").encode("utf-8")
+        }
+        cwd = event.get("cwd", "")
+        if cwd:
+            payload_data["cwd"] = cwd
+        payload = (json.dumps(payload_data) + "\n").encode("utf-8")
         _send_request(s, payload)
     except Exception:
         pass
@@ -168,7 +172,7 @@ def _fire_status(event: dict, state: str) -> None:
             if msg:
                 status_data["message"] = msg[:200]
         elif state == "error":
-            msg = event.get("error_message", "")
+            msg = event.get("error", "") or event.get("error_details", "")
             if msg:
                 status_data["message"] = msg[:200]
 

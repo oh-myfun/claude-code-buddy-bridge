@@ -10,9 +10,11 @@
 
 import asyncio
 import json
+import socket
 import sys
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -137,6 +139,50 @@ def _print_request(event: dict) -> None:
         print(f"  {opts}")
 
 
+def _discover_sync(timeout: float = 3.0) -> list[dict]:
+    """同步版本：发送 UDP 广播发现 daemon"""
+    port = int(os.environ.get("CCBB_TCP_PORT", "9876"))
+    results = []
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(timeout)
+        sock.bind(("", 0))
+
+        sock.sendto(b'{"type":"discover"}\n', ("<broadcast>", port))
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                data, addr = sock.recvfrom(4096)
+                resp = json.loads(data.decode("utf-8"))
+                resp["_from"] = addr[0]
+                results.append(resp)
+            except socket.timeout:
+                break
+    except Exception as e:
+        print(f"[发现] 错误: {e}")
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return results
+
+
+async def _do_discover(timeout: float = 3.0) -> list[dict]:
+    """异步包装：在 executor 中运行同步扫描"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _discover_sync, timeout)
+
+
 async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
     """处理用户输入"""
     loop = asyncio.get_event_loop()
@@ -152,6 +198,18 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
             if cmd.lower() == 'q':
                 print("[设备] 退出…")
                 break
+            elif cmd.lower() == 'x':
+                results = await _do_discover()
+                if results:
+                    for r in results:
+                        sessions = r.get("sessions", [])
+                        print(f"\n[发现] daemon @ {r.get('host')}:{r.get('port')} ({len(sessions)} 个会话)")
+                        for s in sessions:
+                            sid = s.get("session_id", "?")
+                            print(f"  会话: {sid[:8]}...  配对码: {s.get('pairing_code')}")
+                    print()
+                else:
+                    print("[发现] 未找到 daemon")
             elif not state.paired:
                 if len(cmd) == 8:
                     resp = {"type": "pair", "data": {"pairing_code": cmd}}
@@ -296,9 +354,45 @@ async def user_input_task(writer: asyncio.StreamWriter, state: DeviceState):
 
 
 async def main():
-    """主函数 - 作为 TCP 客户端连接到服务端"""
-    host = os.environ.get("CCBB_TCP_HOST", "127.0.0.1")
+    """主函数 — 先扫描发现 daemon，再连接"""
     port = int(os.environ.get("CCBB_TCP_PORT", "9876"))
+    host = os.environ.get("CCBB_TCP_HOST", None)
+
+    # 如果未指定 host，先扫描发现 daemon
+    if not host:
+        print("[设备] 正在扫描局域网内的 ccbb daemon…")
+        results = await _do_discover(timeout=3.0)
+
+        if not results:
+            print("[设备] 未找到 daemon")
+            print("[设备] 可设置 CCBB_TCP_HOST 环境变量直接指定地址")
+            return
+
+        # 展示发现的 daemon
+        print(f"\n[设备] 发现 {len(results)} 个 daemon：")
+        for i, r in enumerate(results):
+            sessions = r.get("sessions", [])
+            session_info = f"{len(sessions)} 个会话" if sessions else "无会话"
+            print(f"  [{i}] {r.get('host')}:{r.get('port')} ({session_info})")
+            for s in sessions:
+                sid = s.get("session_id", "?")
+                print(f"      会话: {sid[:8]}...  配对码: {s.get('pairing_code')}")
+        print()
+
+        if len(results) == 1:
+            host = results[0].get("host")
+            print(f"[设备] 自动选择唯一 daemon: {host}:{port}")
+        else:
+            loop = asyncio.get_event_loop()
+            choice = await loop.run_in_executor(None, input, "[设备] 选择 daemon 编号: ")
+            try:
+                idx = int(choice.strip())
+                host = results[idx].get("host")
+            except (ValueError, IndexError):
+                print("[设备] 无效选择")
+                return
+    else:
+        print(f"[设备] 使用配置地址: {host}:{port}")
 
     print(f"[设备] 正在连接到 TCP 服务端 {host}:{port}…")
 

@@ -97,6 +97,32 @@ class Bridge:
         self._host = host
         self._port = port
 
+    # ── UDP 发现 ────────────────────────────────────────────────────────────
+
+    def get_discovery_info(self, peer_addr: tuple) -> dict:
+        """构建 UDP 发现响应"""
+        sessions = [
+            {"session_id": sid, "pairing_code": s.pairing_code}
+            for sid, s in self._sessions.items()
+        ]
+        return {
+            "type": "discover_response",
+            "host": self._get_local_ip(peer_addr[0]),
+            "port": self._port,
+            "sessions": sessions,
+        }
+
+    @staticmethod
+    def _get_local_ip(peer_ip: str) -> str:
+        """获取与 peer_ip 同网段的本机 IP"""
+        try:
+            # 用 UDP 连接目标 IP 来确定出口地址（不实际发包）
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((peer_ip, 1))
+                return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
     # ── 设备消息发送 ────────────────────────────────────────────────────────
 
     @staticmethod
@@ -185,10 +211,13 @@ class Bridge:
                 "type": "paired", "data": {"pairing_code": session.pairing_code, "session_id": session.session_id},
             })
             # 推送队首请求（如果有）
-            if session.pending_requests and not session.head_pushed:
+            if session.pending_requests and not session.head_pushed and dev in session.paired_devices:
                 first_req = next(iter(session.pending_requests.values()))
                 session.head_pushed = True
                 await self._send_to_device(dev, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
+                # 推送失败时 _send_to_device 会调 _remove_device，设备已不在 session 中
+                if dev not in session.paired_devices:
+                    session.head_pushed = False
         logger.info(f"[Session] {session.session_id[:8]}... 自动配对 {len(pending)} 个预配对设备")
 
     def _unregister_session(self, session_id: str) -> None:
@@ -230,6 +259,11 @@ class Bridge:
             session = self._sessions.get(device.session_id)
             if session:
                 session.paired_devices.discard(device)
+                # 所有配对设备都已断开，清理挂起的请求
+                if not session.paired_devices:
+                    for rid, req in list(session.pending_requests.items()):
+                        if not req.decision_future.done():
+                            req.decision_future.set_result("closed")
             device.session_id = None
 
         try:
@@ -268,9 +302,10 @@ class Bridge:
             "type": "paired", "data": {"pairing_code": pairing_code, "session_id": session_id},
         })
 
-        # 如果有挂起的请求，推送队首给新设备
-        if session.pending_requests:
+        # 如果有挂起的请求且尚未推送，推送队首给新设备
+        if session.pending_requests and not session.head_pushed:
             first_req = next(iter(session.pending_requests.values()))
+            session.head_pushed = True
             await self._send_to_device(device, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
 
         logger.info(f"[设备] {device.addr} 配对到 session {session_id[:8]}... "
@@ -283,6 +318,7 @@ class Bridge:
                              first_msg: dict) -> None:
         """处理设备连接（持久连接）"""
         addr = writer.get_extra_info("peername")
+        self._set_keepalive(writer)
 
         device = DeviceConnection(reader=reader, writer=writer, addr=addr, uid=str(uuid.uuid4()))
         self._unpaired_devices.add(device)
@@ -295,9 +331,9 @@ class Bridge:
             self._remove_device(device)
             return
 
-        await self._process_device_message(device, first_msg)
-
         try:
+            await self._process_device_message(device, first_msg)
+
             rx_buf = bytearray()
             while True:
                 data = await reader.read(4096)
@@ -464,9 +500,7 @@ class Bridge:
             logger.info(f"[审批] 推送请求 id={rid}")
             await self._broadcast(session, "request", {**event, "ccbb_request_id": rid})
 
-        # 等待：设备响应 或 hook 断开（超时由 Claude Code 管理）
-        # 安全网超时：略大于 CC hook timeout (120s) + 余量
-        BRIDGE_REQUEST_TIMEOUT = 125
+        # 等待：设备响应 或 hook 断开（超时由 hook.py 管理）
         hook_disconnected = False
 
         async def _watch_hook():
@@ -480,18 +514,12 @@ class Bridge:
         fut_task = asyncio.ensure_future(fut)
         done, pending = await asyncio.wait(
             [fut_task, reader_task],
-            timeout=BRIDGE_REQUEST_TIMEOUT,
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
             t.cancel()
 
-        if not done:
-            # 超时安全网：hook 未断开且设备未响应
-            result = "timeout"
-            hook_disconnected = True
-            logger.warning(f"[审批] id={rid} 超时 ({BRIDGE_REQUEST_TIMEOUT}s)")
-        elif fut_task in done:
+        if fut_task in done:
             result = fut_task.result()
         else:
             result = "closed"
@@ -569,6 +597,35 @@ class Bridge:
             writer.close()
 
 
+# ── UDP 发现协议 ───────────────────────────────────────────────────────────
+
+
+class DiscoveryProtocol(asyncio.DatagramProtocol):
+    """UDP 广播发现：设备发送 {"type":"discover"}，daemon 回复会话列表"""
+
+    def __init__(self, bridge: Bridge) -> None:
+        self._bridge = bridge
+        self._transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.DatagramTransport) -> None:
+        self._transport = transport
+
+    def datagram_received(self, data: bytes, addr: tuple) -> None:
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if msg.get("type") != "discover":
+            return
+        resp = self._bridge.get_discovery_info(addr)
+        if self._transport:
+            self._transport.sendto(
+                (json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"),
+                addr,
+            )
+            logger.info(f"[发现] 回复 {addr[0]}:{addr[1]}，{len(resp['sessions'])} 个会话")
+
+
 # ── 主入口 ─────────────────────────────────────────────────────────────────
 
 
@@ -597,6 +654,12 @@ async def run() -> None:
     )
     logger.info(f"TCP 服务端已启动，监听 {host}:{port}")
 
+    udp_transport, _ = await loop.create_datagram_endpoint(
+        lambda: DiscoveryProtocol(bridge),
+        local_addr=(host, port),
+    )
+    logger.info(f"UDP 发现服务已启动，监听 {host}:{port}")
+
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_wait")
 
     logger.info("claude-code-buddy-bridge 守护进程已就绪 ✓")
@@ -610,6 +673,7 @@ async def run() -> None:
         t.cancel()
 
     server.close()
+    udp_transport.close()
     try:
         await server.wait_closed()
     except Exception:

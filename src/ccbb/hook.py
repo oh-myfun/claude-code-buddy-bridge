@@ -224,7 +224,7 @@ def _handle_permission_request(event: dict) -> None:
         return
 
     try:
-        payload = (json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        payload = (json.dumps(event, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
         resp = _send_request(s, payload)
 
         if resp and "behavior" in resp:

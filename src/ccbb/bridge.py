@@ -175,7 +175,7 @@ class Bridge:
     async def _send_to_device(self, device: DeviceConnection, obj: dict) -> None:
         """发送消息到设备"""
         try:
-            payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+            payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
             device.writer.write(payload)
             await device.writer.drain()
         except ConnectionError:
@@ -557,7 +557,9 @@ class Bridge:
         # 队首且尚未推送时才推送
         if not session.head_pushed:
             session.head_pushed = True
+            targets = [dev.addr[0] for dev in session.paired_devices]
             logger.info(f"[审批] 推送请求 id={rid}")
+            logger.debug(f"[审批] 推送目标: {', '.join(targets)}")
             await self._broadcast(session, "request", {**event, "ccbb_request_id": rid})
 
         # 等待：设备响应 或 hook 断开（超时由 hook.py 管理）
@@ -596,7 +598,9 @@ class Bridge:
         if session.pending_requests:
             next_req = next(iter(session.pending_requests.values()))
             session.head_pushed = True
+            targets = [dev.addr[0] for dev in session.paired_devices]
             logger.info(f"[审批] 推送下一个请求 id={next_req.id}")
+            logger.debug(f"[审批] 推送目标: {', '.join(targets)}")
             await self._broadcast(session, "request", {**next_req.raw, "ccbb_request_id": next_req.id})
 
         # 响应 Hook（透传 decision 对象，hook 断开则跳过）
@@ -680,7 +684,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
         resp = self._bridge.get_discovery_info(addr)
         if self._transport:
             self._transport.sendto(
-                (json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8"),
+                (json.dumps(resp, ensure_ascii=True) + "\n").encode("utf-8"),
                 addr,
             )
             logger.info(f"[发现] 回复 {addr[0]}:{addr[1]}，{len(resp['sessions'])} 个会话")

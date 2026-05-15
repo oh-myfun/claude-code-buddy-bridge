@@ -562,6 +562,11 @@ class Bridge:
             logger.debug(f"[审批] 推送目标: {', '.join(targets)}")
             await self._broadcast(session, "request", {**event, "ccbb_request_id": rid})
 
+        # 推送后无配对设备，直接关闭（避免死等）
+        if not session.paired_devices and not fut.done():
+            logger.warning(f"[审批] id={rid} 推送后无配对设备，直接关闭")
+            fut.set_result("closed")
+
         # 等待：设备响应 或 hook 断开（超时由 hook.py 管理）
         hook_disconnected = False
 
@@ -602,6 +607,10 @@ class Bridge:
             logger.info(f"[审批] 推送下一个请求 id={next_req.id}")
             logger.debug(f"[审批] 推送目标: {', '.join(targets)}")
             await self._broadcast(session, "request", {**next_req.raw, "ccbb_request_id": next_req.id})
+            # 推送后无配对设备，直接关闭下一个请求
+            if not session.paired_devices and not next_req.decision_future.done():
+                logger.warning(f"[审批] id={next_req.id} 推送后无配对设备，直接关闭")
+                next_req.decision_future.set_result("closed")
 
         # 响应 Hook（透传 decision 对象，hook 断开则跳过）
         if not hook_disconnected:

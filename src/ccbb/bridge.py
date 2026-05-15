@@ -327,11 +327,16 @@ class Bridge:
             },
         })
 
-        # 如果有挂起的请求且尚未推送，推送队首给新设备
-        if session.pending_requests and not session.head_pushed:
-            first_req = next(iter(session.pending_requests.values()))
-            session.head_pushed = True
-            await self._send_to_device(device, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
+        # 如果有挂起的请求，推送队首给新配对设备
+        if session.pending_requests:
+            # head_pushed=True 但无已配对设备 → 推送给了空列表，需要重置
+            if session.head_pushed and len(session.paired_devices) <= 1:
+                # 新配对设备刚加入（paired_devices=1），说明之前没有设备收到推送
+                session.head_pushed = False
+            if not session.head_pushed:
+                first_req = next(iter(session.pending_requests.values()))
+                session.head_pushed = True
+                await self._send_to_device(device, {"type": "request", "data": {**first_req.raw, "ccbb_request_id": first_req.id}})
 
         logger.info(f"[设备] {device.addr} 配对到 session {session_id[:8]}... "
                      f"(共 {len(session.paired_devices)} 个设备)")

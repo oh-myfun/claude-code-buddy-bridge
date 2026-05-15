@@ -225,7 +225,11 @@ class Bridge:
             session.paired_devices.add(dev)
             dev.session_id = session.session_id
             await self._send_to_device(dev, {
-                "type": "paired", "data": {"pairing_code": session.pairing_code, "session_id": session.session_id},
+                "type": "paired", "data": {
+                    "pairing_code": session.pairing_code,
+                    "session_id": session.session_id,
+                    "project": session.project_name,
+                },
             })
             # 推送队首请求（如果有）
             if session.pending_requests and not session.head_pushed and dev in session.paired_devices:
@@ -316,7 +320,11 @@ class Bridge:
         self._unpaired_devices.discard(device)
 
         await self._send_to_device(device, {
-            "type": "paired", "data": {"pairing_code": pairing_code, "session_id": session_id},
+            "type": "paired", "data": {
+                "pairing_code": pairing_code,
+                "session_id": session_id,
+                "project": session.project_name,
+            },
         })
 
         # 如果有挂起的请求且尚未推送，推送队首给新设备

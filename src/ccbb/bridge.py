@@ -168,6 +168,9 @@ class Bridge:
             payload = (json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
             device.writer.write(payload)
             await device.writer.drain()
+        except ConnectionError:
+            logger.debug(f"[设备] 发送到 {device.addr} 失败: 连接已断开")
+            self._remove_device(device)
         except Exception as e:
             logger.warning(f"[设备] 发送到 {device.addr} 失败: {e}")
             self._remove_device(device)
@@ -357,6 +360,8 @@ class Bridge:
                     logger.debug(f"[设备] {addr} 收到: {json.dumps(msg, ensure_ascii=False)}")
                     await self._process_device_message(device, msg)
 
+        except ConnectionError:
+            pass  # 设备断电/网络中断，属于正常断开
         except Exception as e:
             logger.error(f"[设备] {addr} 异常: {e}")
         finally:

@@ -78,7 +78,6 @@ def cmd_install(args: argparse.Namespace) -> None:
     hook_entry = {
         "type": "command",
         "command": command,
-        "timeout": 120,
     }
 
     session_start_hooks = hooks_block.setdefault("SessionStart", [])
@@ -114,7 +113,7 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     matchers = args.tools if args.tools else [""]
     for matcher in matchers:
-        entry: dict = {"hooks": [hook_entry]}
+        entry: dict = {"hooks": [{**hook_entry, "timeout": 120}]}
         if matcher:
             entry["matcher"] = matcher
         permission_hooks.append(entry)

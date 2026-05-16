@@ -34,9 +34,9 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 
 ### 核心模块
 
-- **`src/ccbb/hook.py`** — Claude Code hook 处理三种事件：`SessionStart`（注册会话、显示配对码）、`PermissionRequest`（透传审批请求）、`SessionEnd`（通知清理）。Fail-open 设计。支持 `updatedPermissions` 回传。
+- **`src/ccbb/hook.py`** — Claude Code hook 处理六种事件：`SessionStart`（注册会话）、`PermissionRequest`（透传审批请求）、`SessionEnd`（通知清理）、`UserPromptSubmit`/`Stop`/`StopFailure`（状态变化）。Fail-open 设计。
 - **`src/ccbb/bridge.py`** — 守护进程核心。`Session` 管理每个会话的配对码、配对设备和挂起请求队列。`_pairing_index` 提供 O(1) 配对码→会话查找。
-- **`src/ccbb/cli.py`** — argparse CLI，注册三种 hook（SessionStart、PermissionRequest、SessionEnd）。
+- **`src/ccbb/cli.py`** — argparse CLI，注册六种 hook（SessionStart、PermissionRequest、SessionEnd、UserPromptSubmit、Stop、StopFailure）。
 - **`examples/tcp_device_client.py`** — 交互式测试客户端，支持显示工具详情和"记住规则"选项。
 
 ### 配对机制
@@ -52,7 +52,7 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 
 通过首条消息自动区分连接类型：
 - `type` 字段为 `hello`/`pair`/`decision` → 设备连接（优先判断）
-- 含 `hook_event_name`、`action`（`session_start`/`session_end`）或 `tool_name` 字段 → Hook 连接
+- 含 `hook_event_name`、`action`（`session_start`/`session_end`/`status`）或 `tool_name` 字段 → Hook 连接
 
 ### 消息协议
 
@@ -72,16 +72,16 @@ Claude Code → hook.py (stdin JSON) → TCP 127.0.0.1:9876 → bridge.py (守�
 | `paired` | `{pairing_code, session_id}` | 配对成功 |
 | `pairing_pending` | `{pairing_code, message}` | 预配对（等待 CC 会话启动） |
 | `pairing_failed` | `{reason}` | 配对失败 |
-| `request` | 原始 CC 事件 | 审批请求 |
+| `request` | 原始 CC 事件 + `ccbb_request_id` | 审批请求 |
 | `done` | `{id, decision}` | 审批完成 |
 | `session_end` | `{session_id}` | 会话结束 |
 
-**Hook → Bridge：** `{"action":"session_start","session_id":"..."}`、`{"session_id":"...","tool_name":"...","tool_input":{...}}`、`{"action":"session_end","session_id":"..."}`
+**Hook → Bridge：** `{"action":"session_start","session_id":"...","cwd":"..."}`、透传 CC 原始 PermissionRequest 事件、`{"action":"session_end","session_id":"..."}`、`{"action":"status","session_id":"...","status":{...}}`
 
 **Bridge → Hook 响应：**
 - SessionStart: `{"pairing_code":"AABB1122"}`
-- PermissionRequest: `{"behavior":"allow","ccbb_request_id":"..."}` 或超时返回 `{"behavior":"closed"}`
-- SessionEnd: 无响应（fire-and-forget）
+- PermissionRequest: 透传设备 decision 对象，或超时返回 `{"behavior":"closed"}`
+- SessionEnd / Status: 无响应（fire-and-forget）
 
 ## 提交规范
 

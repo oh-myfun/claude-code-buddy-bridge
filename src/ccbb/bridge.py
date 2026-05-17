@@ -293,7 +293,20 @@ class Bridge:
             pass
 
     async def _handle_pairing_request(self, device: DeviceConnection, pairing_code: str) -> bool:
-        """处理设备的配对请求，支持 session 未启动时的预配对"""
+        """处理设备的配对请求，支持 session 未启动时的预配对和已配对设备切换会话"""
+        # 已配对设备重新配对：先解除旧配对
+        if device.session_id:
+            old_session = self._sessions.get(device.session_id)
+            if old_session:
+                old_session.paired_devices.discard(device)
+                logger.info(f"[设备] {device.addr} 从 session {device.session_id[:8]}... 解绑")
+                # 旧 session 无设备时清理挂起请求
+                if not old_session.paired_devices:
+                    for rid, req in list(old_session.pending_requests.items()):
+                        if not req.decision_future.done():
+                            req.decision_future.set_result("closed")
+            device.session_id = None
+
         session_id = self._pairing_index.get(pairing_code.upper())
         if session_id is None:
             # session 尚未启动，存为预配对

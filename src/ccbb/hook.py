@@ -105,7 +105,7 @@ def _handle_session_start(event: dict) -> None:
         cwd = event.get("cwd", "")
         if cwd:
             payload_data["cwd"] = cwd
-        payload = (json.dumps(payload_data) + "\n").encode("utf-8")
+        payload = (json.dumps(payload_data, ensure_ascii=True) + "\n").encode("utf-8")
         _send_request(s, payload)
     except Exception:
         pass
@@ -135,7 +135,7 @@ def _handle_session_end(event: dict) -> None:
         payload = (json.dumps({
             "action": "session_end",
             "session_id": session_id,
-        }) + "\n").encode("utf-8")
+        }, ensure_ascii=True) + "\n").encode("utf-8")
         s.sendall(payload)
     except Exception:
         pass
@@ -184,7 +184,7 @@ def _fire_status(event: dict, state: str) -> None:
         cwd = event.get("cwd", "")
         if cwd:
             payload_data["cwd"] = cwd
-        payload = (json.dumps(payload_data) + "\n").encode("utf-8")
+        payload = (json.dumps(payload_data, ensure_ascii=True) + "\n").encode("utf-8")
         s.sendall(payload)
     except Exception:
         pass
@@ -195,6 +195,9 @@ def _fire_status(event: dict, state: str) -> None:
             pass
 
     sys.exit(0)
+
+
+# ── Status (UserPromptSubmit / Stop / StopFailure) ─────────────────────────
 
 
 def _handle_user_prompt_submit(event: dict) -> None:
@@ -251,7 +254,8 @@ def _handle_permission_request(event: dict) -> None:
 
 def main() -> None:
     try:
-        event = json.load(sys.stdin)
+        # 强制 UTF-8 读取，避免 Windows 中文版 GBK 编码导致中文乱码
+        event = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception:
         _fail_open()
         return
